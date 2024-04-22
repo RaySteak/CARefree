@@ -28,13 +28,19 @@
 *.so.*
 *.dylib
 
-# Executables
+# Executables, object files and board configs
 *.exe
 *.out
 *.app
 *.i*86
 *.x86_64
 *.hex
+build/
+sdkconfig*
+*.lock
+
+# AWS credentials
+connection_kit
 
 # Debug files
 *.dSYM/
@@ -50,3 +56,12 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Visual Studio Code
+.vscode
+
+# Python
+__pycache__/
+
+# Managed components
+managed_components/
