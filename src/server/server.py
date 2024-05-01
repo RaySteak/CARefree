@@ -3,6 +3,7 @@ import torch
 import pprint
 import numpy as np
 from matplotlib import pyplot as plt
+from matplotlib import patches
 from transformers import AutoImageProcessor, AutoModelForImageClassification, ViTForImageClassification
 from PIL import Image
 from io import BytesIO
@@ -38,6 +39,14 @@ labels_list = ['sad', 'disgust', 'angry', 'neutral', 'fear', 'surprise', 'happy'
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024
 
+SQR_GRAYSCALE_WIDTH = 64
+SQR_GRAYSCALE_HEIGHT = 64
+SQR_GRAYSCALE_LENGTH = 4096
+
+QQQVGA_GRAYSCALE_WIDTH = 80
+QQQVGA_GRAYSCALE_HEIGHT = 60
+QQQVGA_GRAYSCALE_LENGTH = 4800
+
 QVGA_GRAYSCALE_WIDTH = 320
 QVGA_GRAYSCALE_HEIGHT = 240
 QVGA_GRAYSCALE_LENGTH = 76800
@@ -50,32 +59,50 @@ VGA_GRAYSCALE_WIDTH = 640
 VGA_GRAYSCALE_HEIGHT = 480
 VGA_GRAYSCALE_LENGTH = 307200
 
-@app.route('/test', methods = ['GET'])
-def test():
-    return 'asdasdasd'
+debug_rect = None
 
-@app.route('/embed', methods = ['POST'])
-def embed_photo():
-    if request.headers['Content-Type'] == 'application/jpeg':
-        img = Image.open(BytesIO(request.data))
+@app.route('/debug/set_rect', methods = ['POST'])
+def debug_set_rect():
+    global debug_rect
+    debug_rect = np.frombuffer(request.data, dtype = np.int32)
+    print("RECT IS ", debug_rect)
+    return 'OK'
+
+def extract_image(data, content_type):
+    if content_type == 'application/jpeg':
+        img = Image.open(BytesIO(data))
         img = np.array(img)
         img = np.stack((img, img, img), axis = 2)
-    elif len(request.data) == QVGA_RGB565_LENGTH:
+    elif len(data) == QVGA_RGB565_LENGTH:
         img = np.zeros((QVGA_RGB565_HEIGHT, QVGA_RGB565_WIDTH, 3), dtype = np.uint8)
         for i in range(0, QVGA_RGB565_LENGTH, 2):
-            high = request.data[i]
-            low = request.data[i+1]
+            high = data[i]
+            low = data[i+1]
             # converting to [0, 255] uint8
             r = high & 0b11111000
             g = ((high & 0b111) << 5) | (low >> 3)
             b = (low & 0b11111) << 3
             img[i // 2 // QVGA_RGB565_WIDTH, i // 2 % QVGA_RGB565_WIDTH] = [r, g, b]
-    elif len(request.data) == QVGA_GRAYSCALE_LENGTH:
-        img_flattened = np.frombuffer(request.data, dtype = np.uint8)
-        img = img_flattened.reshape((QVGA_GRAYSCALE_HEIGHT, QVGA_GRAYSCALE_WIDTH))
+    elif len(data) == QVGA_GRAYSCALE_LENGTH or len(data) == QQQVGA_GRAYSCALE_LENGTH or len(data) == SQR_GRAYSCALE_LENGTH:
+        img_flattened = np.frombuffer(data, dtype = np.uint8)
+        img = img_flattened.reshape({
+            QVGA_GRAYSCALE_LENGTH : (QVGA_GRAYSCALE_HEIGHT, QVGA_GRAYSCALE_WIDTH),
+            QQQVGA_GRAYSCALE_LENGTH : (QQQVGA_GRAYSCALE_HEIGHT, QQQVGA_GRAYSCALE_WIDTH),
+            SQR_GRAYSCALE_LENGTH : (SQR_GRAYSCALE_HEIGHT, SQR_GRAYSCALE_WIDTH)
+            }[len(data)])
         img = np.stack((img, img, img), axis = 2)
+    return img
+
+@app.route('/debug/set_image', methods = ['POST'])
+def embed_photo():
+    global debug_rect
+    img = extract_image(request.data, request.headers['Content-Type'])
     plt.imshow(img)
+    if debug_rect is not None:
+        plt.gca().add_patch(patches.Rectangle((debug_rect[0], debug_rect[1]), debug_rect[2] - debug_rect[0], debug_rect[3] - debug_rect[1], linewidth = 1, edgecolor = 'r', facecolor = 'none'))
+        debug_rect = None
     plt.show()
+    plt.gca().clear()
     img = torch.Tensor(processor(img)['pixel_values'][0]).to(device)[None, :]
     with torch.no_grad():
         out = model.vit(img)
@@ -85,6 +112,7 @@ def embed_photo():
         class_name = labels_list[class_idx]
     feats_bytes = feats.squeeze(0).cpu().detach().numpy().tobytes()
     print("FIFTH VALUE IS ", feats[:, 5][0].item())
+    print(class_name)
     return feats_bytes
 
 if __name__ == '__main__':

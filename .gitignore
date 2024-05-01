@@ -36,7 +36,7 @@
 *.x86_64
 *.hex
 build/
-sdkconfig*
+sdkconfig.old
 *.lock
 
 # AWS credentials

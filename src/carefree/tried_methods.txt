@@ -1,0 +1,28 @@
+Camera:
+- By tinkering with the camera we can notice that it can only output 2 resolutions (QVGA and VGA),
+and 2 color formats (RGB565 and grayscale). By default, VGA at RGB565 is out of question as
+the buffer needed would be larger than the RAM memory the board has.
+- How do we choose from the remaining 3 possibilities then? Well, initially, it would be ideal to
+use the VGA grayscale setting (second highest memory usage after RGB565 VGA) since colours
+don't really help us as the camera has pretty bad colour recognition (as tested). Still, this
+would leave us with very little remaining memory, since the FreeRTOS components already eat up
+some memory. We don't need that high of resolution anyway, as QVGA (320 x 240 is) more than enough
+and even most big classification models use a smaller input size than this. As already mentioned,
+grayscale would be preferable, but the built-in MSR model takes as input 3-channel RGB images, so
+we will choose RGB565 QVGA and grayscale it before sending to the edge (combined with jpg
+conversion and/or further downscaling)
+
+Labeling data:
+Using a pre-trained model from huggingface running on the edge as ground truth is the way to go,
+otherwise there is no way to label the images.
+
+Feature extraction and classification:
+- Ideally, we would need a very small (maybe 70KB or less) pre-trained CNN model to do transfer learning
+on it as any end-to-end training on the ESP32 is out of the question (both memory-wise and implementation-wise,
+as backpropagation and gradient descent would need to be implementeed). Even with quantization and pruning
+we weren't able to find one that small. Smallest we could find is the PrunaAI SqueezeNet.
+What about implementing and training our own model? Too much of a hassle too as it would require additional
+tinkering with tensorflow lite micro and the model wouldn't learn much anyway.
+- Solution: extract some features from the image and then train a very simple classifier. Best idea would
+be to use some very toned-down HoG-style features
+- For classifier, it would be ideal to use a one-layer NN, but that might be too big.
