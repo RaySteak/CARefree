@@ -47,6 +47,10 @@ QQQVGA_GRAYSCALE_WIDTH = 80
 QQQVGA_GRAYSCALE_HEIGHT = 60
 QQQVGA_GRAYSCALE_LENGTH = 4800
 
+QQQVGA_RGB565_WIDTH = 80
+QQQVGA_RGB565_HEIGHT = 60
+QQQVGA_RGB565_LENGTH = 9600
+
 QVGA_GRAYSCALE_WIDTH = 320
 QVGA_GRAYSCALE_HEIGHT = 240
 QVGA_GRAYSCALE_LENGTH = 76800
@@ -73,16 +77,20 @@ def extract_image(data, content_type):
         img = Image.open(BytesIO(data))
         img = np.array(img)
         img = np.stack((img, img, img), axis = 2)
-    elif len(data) == QVGA_RGB565_LENGTH:
-        img = np.zeros((QVGA_RGB565_HEIGHT, QVGA_RGB565_WIDTH, 3), dtype = np.uint8)
-        for i in range(0, QVGA_RGB565_LENGTH, 2):
+    elif len(data) == QVGA_RGB565_LENGTH or len(data) == QQQVGA_RGB565_LENGTH:
+        height, width = {
+            QVGA_RGB565_LENGTH : (QVGA_RGB565_HEIGHT, QVGA_RGB565_WIDTH),
+            QQQVGA_RGB565_LENGTH : (QQQVGA_RGB565_HEIGHT, QQQVGA_RGB565_WIDTH)
+            }[len(data)]
+        img = np.zeros((height, width, 3), dtype = np.uint8)
+        for i in range(0, len(data), 2):
             high = data[i]
             low = data[i+1]
             # converting to [0, 255] uint8
             r = high & 0b11111000
             g = ((high & 0b111) << 5) | (low >> 3)
             b = (low & 0b11111) << 3
-            img[i // 2 // QVGA_RGB565_WIDTH, i // 2 % QVGA_RGB565_WIDTH] = [r, g, b]
+            img[i // 2 // width, i // 2 % width] = [r, g, b]
     elif len(data) == QVGA_GRAYSCALE_LENGTH or len(data) == QQQVGA_GRAYSCALE_LENGTH or len(data) == SQR_GRAYSCALE_LENGTH:
         img_flattened = np.frombuffer(data, dtype = np.uint8)
         img = img_flattened.reshape({

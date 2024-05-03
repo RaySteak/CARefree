@@ -17,12 +17,17 @@
 #include "img_converters.h"
 #include "human_face_detect_msr01.hpp"
 #include "math.h"
-// #include "human_face_detect_mnp01.hpp"
 #include "dl_tool.hpp"
+#include "esp_random.h"
 
 // DEBUG DEFINES
 #define DEBUG_SHOW_IMAGE 0
-#define DEBUG_SHOW_FACE 0
+#define DEBUG_SHOW_FACE 1
+#define DEBUG_PRINT_LOSS 1
+
+// CONFIG DEFINES
+#define USE_FACE_DETECTION 0
+#define TWO_LAYER_NN 1
 
 // CAMERA DEFINES
 
@@ -47,11 +52,24 @@
 #define CAM_PIN_PWDN 7
 // #define CAM_PIN_PWDN -1
 
-#define XCLK_FREQ_HZ 20000000
+// Be careful when changing this, as it may make certain resolutions not work
+// Use 16MHz for QQVGA, 20MHz for everything else.
+// Setting it to 16MHz uses the weird EDMA mode that allocates double the space
+// plus 16 bytes instead of the needed 19.2KB for one buffer. This seems to have
+// to do with the fact that it can't do grayscale at this resolution (with
+// RGB 565 it allocates the same amount). Still weird that if not in EDMA
+// (freq is set to anything but 16MHz), it allocates exactly the correct amount.
+// Still, the ~20KB waste is still better than the ~60KB waste and inconvenience
+// of QVGA
+// Datasheet for the camera says this should be between 10MHz and 48MHz, typical being 24MHz
+#define XCLK_FREQ_HZ 16000000
+#if USE_FACE_DETECTION
 #define PIXFORMAT PIXFORMAT_RGB565
-// #define PIXFORMAT PIXFORMAT_GRAYSCALE
 #define FRAMESIZE FRAMESIZE_QVGA
-// #define FRAMESIZE FRAMESIZE_VGA
+#else
+#define PIXFORMAT PIXFORMAT_GRAYSCALE
+#define FRAMESIZE FRAMESIZE_QQVGA
+#endif
 #define JPG_MAX_SIZE 5 * 1024
 #define JPG_QUALITY 12
 
@@ -66,9 +84,33 @@
 
 // ML DEFINES
 
+// feature extraction
+#if USE_FACE_DETECTION
 #define POOL_KERNEL_SIZE 4
 #define FACE_SIZE 64
-#define FEATS_LEN 576 // dependent on image face size and HoG parameters
+#define HOG_PATCH_SIZE 16
+#define HOG_NUM_BINS 5
+#define FEATS_LEN 80 // dependent on image face size and HOG parameters
+#else
+#define POOL_KERNEL_SIZE 2
+#define FACE_SIZE 64
+#define HOG_PATCH_SIZE 8
+#define HOG_NUM_BINS 9
+#define FEATS_LEN 576 // dependent on image face size and HOG parameters
+#endif
+// training
+typedef enum _activation
+{
+    RELU,
+    SIGMOID
+} activation;
+
+#if TWO_LAYER_NN
+#define HIDDEN_LAYER_SIZE 50
+#endif
+#define NUM_CLASSES 7
+#define LEARNING_RATE 0.01f
+#define ACTIVATION RELU
 
 // TAGS
 
@@ -223,9 +265,12 @@ int camera_init(pixformat_t pixformat, framesize_t framesize)
     gpio_set_direction((gpio_num_t)CAM_PIN_PWDN, (gpio_mode_t)GPIO_MODE_OUTPUT);
     gpio_set_level((gpio_num_t)CAM_PIN_PWDN, (uint32_t)0);
 
-    esp_rom_gpio_pad_select_gpio((uint32_t)CAM_PIN_RET);
-    gpio_set_direction((gpio_num_t)CAM_PIN_RET, (gpio_mode_t)GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)CAM_PIN_PWDN, (uint32_t)1);
+    if (CAM_PIN_RET != -1)
+    {
+        esp_rom_gpio_pad_select_gpio((uint32_t)CAM_PIN_RET);
+        gpio_set_direction((gpio_num_t)CAM_PIN_RET, (gpio_mode_t)GPIO_MODE_OUTPUT);
+        gpio_set_level((gpio_num_t)CAM_PIN_RET, (uint32_t)1);
+    }
 
     camera_config_t config;
     memset(&config, 0, sizeof(config));
@@ -272,6 +317,7 @@ size_t jpg_write_buf_cb(void *arg, size_t index, const void *data, size_t len)
     return len;
 }
 
+// TODO: why does this not work with average pooling but works when picking the first value in the kernel??????
 void *avg_pool_rgb565(uint16_t *in, int height, int width, int kernel_size, bool convert_to_grayscale)
 {
     int out_height = height / kernel_size;
@@ -298,34 +344,81 @@ void *avg_pool_rgb565(uint16_t *in, int height, int width, int kernel_size, bool
                     sum[0] += (pixel >> 11);
                     sum[1] += ((pixel >> 5) & 0b111111);
                     sum[2] += (pixel & 0b11111);
+                    // break;
                 }
+                // break;
             }
-            uint16_t r = (uint16_t)(sum[0] / (kernel_size * kernel_size));
-            uint16_t g = (uint16_t)(sum[1] / (kernel_size * kernel_size));
-            uint16_t b = (uint16_t)(sum[2] / (kernel_size * kernel_size));
+            uint16_t r = (uint16_t)roundf(sum[0] / (kernel_size * kernel_size));
+            uint16_t g = (uint16_t)roundf(sum[1] / (kernel_size * kernel_size));
+            uint16_t b = (uint16_t)roundf(sum[2] / (kernel_size * kernel_size));
+            // uint16_t r = (uint16_t)sum[0];
+            // uint16_t g = (uint16_t)sum[1];
+            // uint16_t b = (uint16_t)sum[2];
 
             if (convert_to_grayscale)
-                ((uint8_t *)out)[(i / kernel_size) * out_width + (j / kernel_size)] = ((r << 3) + (g << 2) + (b << 3)) / 3;
+            {
+                uint8_t colorimetric_grasycale = (uint8_t)roundf(255.f * ((0.2126f * r / 31.f) + (0.7152 * g / 63.f) + (0.0722 * b / 31.f)));
+                ((uint8_t *)out)[(i / kernel_size) * out_width + (j / kernel_size)] = colorimetric_grasycale;
+            }
             else
+            {
                 ((uint16_t *)out)[(i / kernel_size) * out_width + (j / kernel_size)] = (r << 11) | (g << 5) | b;
+            }
         }
     }
     return out;
 }
 
-uint8_t *resize_bilinear_grayscale(uint8_t *in, int height, int width, int out_height, int out_width, dl::detect::result_t &face_pos)
+void *avg_pool_grayscale(uint8_t *in, int height, int width, int kernel_size)
+{
+    int out_height = height / kernel_size;
+    int out_width = width / kernel_size;
+    uint8_t *out = NULL;
+    size_t to_alloc = out_width * out_height;
+
+    out = (uint8_t *)malloc(to_alloc);
+    if (!out)
+    {
+        ESP_LOGE(CAM_TAG, "Failed to allocate %lu bytes of memory for pooled image", to_alloc);
+        return NULL;
+    }
+    for (int i = 0; i < height; i += kernel_size)
+    {
+        for (int j = 0; j < width; j += kernel_size)
+        {
+            float sum = 0.f;
+            for (int bi = 0; bi < kernel_size; bi++)
+            {
+                for (int bj = 0; bj < kernel_size; bj++)
+                    sum += in[(i + bi) * width + j + bj];
+            }
+            out[(i / kernel_size) * out_width + (j / kernel_size)] = sum / (kernel_size * kernel_size);
+        }
+    }
+    return out;
+}
+
+uint8_t *resize_bilinear_grayscale(uint8_t *in, int height, int width, int out_height, int out_width, dl::detect::result_t *face_pos)
 {
     uint8_t *out = (uint8_t *)malloc(out_height * out_width);
 
     for (int i = 0; i < out_height; i++)
     {
-        float in_i = i / ((float)out_height) * (face_pos.box[3] - face_pos.box[1]) + face_pos.box[1];
+        float in_i;
+        if (face_pos)
+            in_i = i / ((float)out_height) * (face_pos->box[3] - face_pos->box[1]) + face_pos->box[1];
+        else
+            in_i = i / ((float)out_height) * height;
         int in_i_1 = (int)floorf(in_i);
         int in_i_2 = (int)ceilf(in_i);
         in_i_2 = in_i_1 == in_i_2 ? in_i_2 + 1 : in_i_2;
         for (int j = 0; j < out_width; j++)
         {
-            float in_j = j / ((float)out_width) * (face_pos.box[2] - face_pos.box[0]) + face_pos.box[0];
+            float in_j;
+            if (face_pos)
+                in_j = j / ((float)out_width) * (face_pos->box[2] - face_pos->box[0]) + face_pos->box[0];
+            else
+                in_j = j / ((float)out_width) * width;
             int in_j_1 = (int)floorf(in_j);
             int in_j_2 = (int)ceilf(in_j);
             in_j_2 = in_j_1 == in_j_2 ? in_j_2 + 1 : in_j_2;
@@ -341,11 +434,17 @@ uint8_t *resize_bilinear_grayscale(uint8_t *in, int height, int width, int out_h
 
 float *extract_hog_features(uint8_t *in, int height, int width)
 {
-    const int patch_size = 8;
-    const int num_bins = 9;
+    const int patch_size = HOG_PATCH_SIZE;
+    const int num_bins = HOG_NUM_BINS;
     int delta = 180 / num_bins;
+    int num_elements = (height / patch_size) * (width / patch_size) * num_bins;
 
-    float *hog = (float *)malloc((height / patch_size) * (width / patch_size) * num_bins * sizeof(float));
+    float *hog = (float *)calloc(num_elements, sizeof(float));
+    if (!hog)
+    {
+        ESP_LOGE(CAM_TAG, "Failed to allocate %lu bytes of memory for HOG", num_elements * sizeof(float));
+        return NULL;
+    }
 
     for (int i = 0; i < height; i += patch_size)
     {
@@ -379,7 +478,8 @@ float *extract_hog_features(uint8_t *in, int height, int width)
                         hog[bin1_pos + 1] += mag - contrib1;
                 }
             }
-            // Unlike standard HoG, we don't perform conflation of neighboring blocks here (7 * 7 * 36 would be too large of a feature vector)
+            // Unlike standard HOG, we don't perform conflation of neighboring blocks here,
+            // as it increases feature vector size by a factor of at least 2
             // Instead, normalization is done on each block
             float sqr_norm = 0.f;
             for (int k = 0; k < num_bins; k++)
@@ -400,22 +500,26 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
         return -1;
 
     // Process image
-    ESP_LOGI(CAM_TAG, "Image captured height=%d, width=%d, length=%d", fb->height, fb->width, fb->len);
+    // ESP_LOGI(CAM_TAG, "Image captured height=%d, width=%d, length=%d", fb->height, fb->width, fb->len);
     if (wifi_connected)
     {
+#if USE_FACE_DETECTION
         // It doesn't work to use the pooled image for HumanFaceDetectMSR01 infering, because of this error:
         // assert failed: dl::Tensor<T>& dl::Tensor<T>::set_shape(std::vector<int>) [with T = short int] dl_variable.cpp:20 (shape[i] >= 0)
         // TODO: maybe look into it but it seems to be a bug with the library (maybe try different pooling shapes or something
-        // but even with square 60x60 it seems to complain, maybe it only wants QVGA but it should have a resize thingy anyway)
-        ESP_LOGW(CAM_TAG, "FREE HEAP MEMORY BEFORE INFER: %lu", esp_get_free_heap_size());
+        // but even with 60x60 and QQVGA it seems to complain, seems to not like small input sizes, as aspect ratio doesn't seem to matter)
+        // ESP_LOGW(CAM_TAG, "FREE HEAP MEMORY BEFORE INFER: %lu", esp_get_free_heap_size());
         std::list<dl::detect::result_t> candidates = s1->infer((uint16_t *)fb->buf, {(int)fb->height, (int)fb->width, 3});
+#endif
 
 #if DEBUG_SHOW_IMAGE
+#if USE_FACE_DETECTION
         if (candidates.size())
         {
             int32_t rect[4] = {candidates.front().box[0], candidates.front().box[1], candidates.front().box[2], candidates.front().box[3]};
             http_post(HTTP_HOST, HTTP_PORT, "/debug/set_rect", (char *)rect, 4 * sizeof(uint32_t), "application/octet-stream", NULL);
         }
+#endif
         if (send_jpeg_encoded) // This makes the program run out of memory on next img, beware
         {
             char *jpg_img = (char *)malloc(JPG_MAX_SIZE);
@@ -432,26 +536,42 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
             http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)fb->buf, fb->len, "application/octet-stream", NULL);
         }
 #endif
-        if (candidates.size())
+
+#if USE_FACE_DETECTION
+        if (!candidates.size())
         {
-            dl::detect::result_t &face = candidates.front();
-            uint8_t *pooled = (uint8_t *)avg_pool_rgb565((uint16_t *)fb->buf, fb->height, fb->width, POOL_KERNEL_SIZE, true);
-            int height = fb->height / POOL_KERNEL_SIZE;
-            int width = fb->width / POOL_KERNEL_SIZE;
-            face.box[0] = face.box[0] < 0 ? 0 : face.box[0] / POOL_KERNEL_SIZE;
-            face.box[1] = face.box[1] < 0 ? 0 : face.box[1] / POOL_KERNEL_SIZE;
-            face.box[2] = face.box[2] > fb->width ? width : (int)(ceilf(face.box[2] / (float)POOL_KERNEL_SIZE));
-            face.box[3] = face.box[3] > fb->height ? height : (int)(ceilf(face.box[3] / (float)POOL_KERNEL_SIZE));
-            uint8_t *resized = resize_bilinear_grayscale(pooled, height, width, 64, 64, face);
-            free(pooled);
-#if DEBUG_SHOW_FACE
-            http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)resized, FACE_SIZE * FACE_SIZE, "application/octet-stream", NULL);
-#endif
-            float *hog = extract_hog_features(resized, FACE_SIZE, FACE_SIZE);
-            free(resized);
-            xQueueSend(feats_queue, hog, portMAX_DELAY);
-            free(hog);
+            // TODO: turn this into goto (disable unused label error for that)
+            esp_camera_fb_return(fb);
+            return 0;
         }
+
+        dl::detect::result_t &face = candidates.front();
+        uint8_t *pooled = (uint8_t *)avg_pool_rgb565((uint16_t *)fb->buf, fb->height, fb->width, POOL_KERNEL_SIZE, true);
+        int height = fb->height / POOL_KERNEL_SIZE;
+        int width = fb->width / POOL_KERNEL_SIZE;
+        // http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)pooled, height * width, "application/octet-stream", NULL)
+        face.box[0] = face.box[0] < 0 ? 0 : face.box[0] / POOL_KERNEL_SIZE;
+        face.box[1] = face.box[1] < 0 ? 0 : face.box[1] / POOL_KERNEL_SIZE;
+        face.box[2] = face.box[2] > fb->width ? width : (int)(ceilf(face.box[2] / (float)POOL_KERNEL_SIZE));
+        face.box[3] = face.box[3] > fb->height ? height : (int)(ceilf(face.box[3] / (float)POOL_KERNEL_SIZE));
+
+        uint8_t *resized = resize_bilinear_grayscale(pooled, height, width, FACE_SIZE, FACE_SIZE, &face);
+        free(pooled);
+#else
+        uint8_t *pooled = (uint8_t *)avg_pool_grayscale((uint8_t *)fb->buf, fb->height, fb->width, POOL_KERNEL_SIZE);
+        int height = fb->height / POOL_KERNEL_SIZE;
+        int width = fb->width / POOL_KERNEL_SIZE;
+
+        uint8_t *resized = resize_bilinear_grayscale(pooled, height, width, FACE_SIZE, FACE_SIZE, NULL);
+        free(pooled);
+#endif
+#if DEBUG_SHOW_FACE
+        http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)resized, FACE_SIZE * FACE_SIZE, "application/octet-stream", NULL);
+#endif
+        float *hog = extract_hog_features(resized, FACE_SIZE, FACE_SIZE);
+        free(resized);
+        xQueueSend(feats_queue, hog, portMAX_DELAY);
+        free(hog);
     }
     // Return the frame buffer back to the driver for reuse
     esp_camera_fb_return(fb);
@@ -460,24 +580,164 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
 
 // ML FUNCTIONS
 
+float uniform_rand(float min, float max)
+{
+    return min + (max - min) * (esp_random() / (float)UINT32_MAX);
+}
+
+void linear_forward(float *feats, float *w, float *b, int in_size, int out_size, float *out)
+{
+    for (int j = 0; j < out_size; j++)
+        out[j] = b[j];
+    for (int i = 0; i < in_size; i++)
+    {
+        for (int j = 0; j < out_size; j++)
+            out[j] += feats[j] * w[i * out_size + j];
+    }
+}
+
+void activation_forward(float *in, int size, activation act)
+{
+    for (int i = 0; i < size; i++)
+    {
+        switch (act)
+        {
+        case RELU:
+            in[i] = in[i] < 0.f ? 0.f : in[i];
+            break;
+        case SIGMOID:
+            in[i] = 1.f / (1.f + expf(-in[i]));
+            break;
+        }
+    }
+}
+
+void activation_backward(float *grads, float *output, int size, activation act)
+{
+    for (int i = 0; i < size; i++)
+    {
+        switch (act)
+        {
+        case RELU:
+            grads[i] = output[i] != 0.f ? grads[i] : 0.f;
+            break;
+        case SIGMOID:
+            grads[i] = grads[i] * (1 - output[i]) * output[i];
+            break;
+        }
+    }
+}
+
+float cross_entropy_with_logits(float *in, int target)
+{
+    float softmax_denom_sum = 0.f;
+    for (int j = 0; j < NUM_CLASSES; j++)
+        softmax_denom_sum += expf(in[j]);
+    return softmax_denom_sum - in[target];
+}
+
+float *backprop_cross_entropy(float *out, int target)
+{
+    float *grads = (float *)malloc(FEATS_LEN * sizeof(float));
+    float softmax = 0.f;
+    for (int j = 0; j < NUM_CLASSES; j++)
+        softmax += expf(out[j]);
+    softmax = expf(out[target]) / softmax;
+
+    for (int j = 0; j < NUM_CLASSES; j++)
+        grads[j] = softmax - (j == target ? 1.f : 0.f);
+
+    return grads;
+}
+
 void train_task(void *arg)
 {
     static float feats[FEATS_LEN];
-    static float w[FEATS_LEN * 7];
-    static float b[FEATS_LEN];
+#if TWO_LAYER_NN
+    static float w1[FEATS_LEN * HIDDEN_LAYER_SIZE];
+    static float b1[HIDDEN_LAYER_SIZE] = {0};
+    static float w2[HIDDEN_LAYER_SIZE * NUM_CLASSES];
+    static float b2[NUM_CLASSES] = {0};
+    float *const weights[] = {w1, w2};
+    float *const biases[] = {b1, b2};
+    const int layer_sizes[] = {FEATS_LEN, HIDDEN_LAYER_SIZE, NUM_CLASSES};
+    const int num_layers = 2;
+#else
+    static float w[FEATS_LEN * NUM_CLASSES];
+    static float b[FEATS_LEN] = {0};
+    float *const weights[] = {w};
+    float *const biases[] = {b};
+    const int layer_sizes[] = {FEATS_LEN, NUM_CLASSES};
+    const int num_layers = 1;
+#endif
+    static float out[NUM_CLASSES];
 
-    while (1)
+    for (int l = 0; l < num_layers; l++)
+    {
+        for (int i = 0; i < layer_sizes[l] * layer_sizes[l + 1]; i++)
+        {
+            // Uniform Glorot initialization
+            float x = sqrtf(6.f / (layer_sizes[l] + layer_sizes[l + 1]));
+            weights[l][i] = uniform_rand(-x, x);
+        }
+    }
+
+    for (int step = 0;; step++)
     {
         xQueueReceive(feats_queue, feats, portMAX_DELAY);
-        // Uncomment to see whether program actually works with the set weights and biases without running out of memory
-        // If uncommented, the optimizing compiler just removes the definitions for the unused vectors
-        // for (int i = 0; i < FEATS_LEN; i++)
-        // {
-        //     w[i] = feats[i] + 1.f;
-        //     b[i] = feats[i] + 2.f;
-        // }
-        // TODO: train a classifier, preferably a 1-layer NN
-        ESP_LOGW(HTTP_TAG, "5th value of features is %f", feats[5]);
+        int target = 0; // TODO: replace with target sent from server (should be first in the queue)
+
+        // Forward pass
+#if TWO_LAYER_NN
+        float *hidden = (float *)malloc(HIDDEN_LAYER_SIZE * sizeof(float));
+        linear_forward(feats, w1, b1, FEATS_LEN, HIDDEN_LAYER_SIZE, hidden);
+        activation_forward(hidden, HIDDEN_LAYER_SIZE, ACTIVATION);
+        linear_forward(hidden, w2, b2, HIDDEN_LAYER_SIZE, NUM_CLASSES, out);
+#else
+        linear_forward(feats, w, b, FEATS_LEN, NUM_CLASSES, out);
+#endif
+#if DEBUG_PRINT_LOSS
+        float loss = cross_entropy_with_logits(out, target);
+        ESP_LOGI(ML_TAG, "Step %d, Loss=%f", step, loss);
+#endif
+        // Backprop and gradient descent
+        // Computing the output loss or logits is optional, the formula just needs the logits from the last layer
+        float *grads_out = backprop_cross_entropy(out, target);
+        // The gradients for the weights are one vector outer product away. We can apply backpropagation directly without
+        // storing them, thus saving memory. Even with a second layer, we can first apply gradient descent on the current layer
+        // while also computing the gradients for the input of the layer and then continue with backpropagation on the next layer.
+#if TWO_LAYER_NN
+        // updating gradients of second layer and computing gradients for hidden layer (also known as first layer)
+        float *grads_first = (float *)malloc(HIDDEN_LAYER_SIZE * sizeof(float));
+        for (int i = 0; i < HIDDEN_LAYER_SIZE; i++)
+        {
+            grads_first[i] = 0.f;
+            for (int j = 0; j < NUM_CLASSES; j++)
+            {
+                // make sure to compute hidden layer gradients before gradient update
+                grads_first[i] += w2[i * NUM_CLASSES + j] * grads_out[j];
+                w2[i * NUM_CLASSES + j] -= LEARNING_RATE * hidden[i] * grads_out[j];
+            }
+        }
+        for (int j = 0; j < NUM_CLASSES; j++)
+            b2[j] -= LEARNING_RATE * grads_out[j];
+        free(grads_out);
+        // computing gradients through hidden layer activation
+        activation_backward(grads_first, hidden, HIDDEN_LAYER_SIZE, ACTIVATION);
+        free(hidden);
+#else
+        // The gradients of first layer and of the output layer are one and the same
+        float *grads_first = grads_out;
+#endif
+        // Updating gradients for first layer
+        for (int i = 0; i < layer_sizes[0]; i++)
+        {
+            for (int j = 0; j < layer_sizes[1]; j++)
+                weights[0][i * layer_sizes[1] + j] -= LEARNING_RATE * feats[i] * grads_first[j];
+        }
+        for (int j = 0; j < NUM_CLASSES; j++)
+            biases[0][j] -= LEARNING_RATE * grads_first[j];
+        free(grads_first);
     }
 }
 
@@ -502,7 +762,7 @@ extern "C" void app_main(void)
     }
 
     // ML
-    HumanFaceDetectMSR01 s1(0.1F, 0.5F, 1, 0.2F);
+    HumanFaceDetectMSR01 s1(0.1F, 0.5F, 1, 0.2F); // TODO: make these defines and find the sweet spot
 
     feats_queue = xQueueCreate(1, FEATS_LEN * sizeof(float));
 
