@@ -282,14 +282,8 @@ esp_http_client_handle_t http_post(const char *host, int port, const char *path,
     esp_http_client_set_header(client, "Content-Type", content_type);
     esp_http_client_set_post_field(client, data, data_len);
     int ret = esp_http_client_perform(client);
-    if (ret == ESP_ERR_HTTP_EAGAIN)
-    {
-        // TODO: check why in async mode it always returns EAGAIN and doesn't work.
-        // After fixing, remove this whole EAGAIN verification as it should never return that normally
-        ESP_LOGE(HTTP_TAG, "EAGAIN error");
-        if (response && response->done_sem)
-            xSemaphoreGive(response->done_sem);
-    }
+    if (ret != ESP_OK)
+        ESP_LOGE(HTTP_TAG, "ERROR IN HTTP PERFORM");
     if (async)
         return client;
     esp_http_client_cleanup(client);
@@ -512,8 +506,8 @@ void *extract_hog_features(uint8_t *in, int height, int width)
                     pos_diff2 = i == height - 1 ? in[pos] : in[pos + width];
                     dy = in[pos_diff1] - in[pos_diff2];
 
-                    float angle = atan2f(dy, dx); // returns result in [-PI, PI]
-                    angle = angle < 0.f ? angle + M_PI : angle;
+                    float angle = atan2f(dy, dx);               // returns result in [-PI, PI]
+                    angle = angle < 0.f ? angle + M_PI : angle; // constrain angle to [0, PI]
                     int grad = (int)roundf(angle / M_PI * 180.f);
                     int mag = (int)roundf(sqrtf(dx * dx + dy * dy));
                     int bin_angle = (grad / delta) * delta;
@@ -720,9 +714,13 @@ float *backprop_cross_entropy(float *out, int target)
 {
     float *grads = (float *)malloc(FEATS_LEN * sizeof(float));
     float softmax = 0.f;
+    // Numerically stable softmax
+    float out_max = out[0];
+    for (int j = 1; j < NUM_CLASSES; j++)
+        out_max = out[j] > out_max ? out[j] : out_max;
     for (int j = 0; j < NUM_CLASSES; j++)
-        softmax += expf(out[j]);
-    softmax = expf(out[target]) / softmax;
+        softmax += expf(out[j] - out_max);
+    softmax = expf(out[target] - out_max) / softmax;
 
     for (int j = 0; j < NUM_CLASSES; j++)
         grads[j] = softmax - (j == target ? 1.f : 0.f);
