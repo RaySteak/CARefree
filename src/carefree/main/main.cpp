@@ -19,6 +19,7 @@
 #include "math.h"
 #include "dl_tool.hpp"
 #include "esp_random.h"
+#include "esp_crt_bundle.h"
 
 // DEBUG DEFINES
 #define DEBUG_SHOW_IMAGE 0
@@ -28,6 +29,9 @@
 // CONFIG DEFINES
 #define USE_FACE_DETECTION 0
 #define TWO_LAYER_NN 1
+#define HTTPS 0
+// Beware, async works with HTTPS only. Also, right now it doesn't work at all because it returns EAGAIN only (TODO: fix that)
+#define ASYNC_HTTP 0
 
 // CAMERA DEFINES
 
@@ -102,7 +106,8 @@
 typedef enum _activation
 {
     RELU,
-    SIGMOID
+    SIGMOID,
+    TANH
 } activation;
 
 #if TWO_LAYER_NN
@@ -135,6 +140,14 @@ const char *pass = "ayylmao123";
 bool wifi_connected = false;
 
 // HTTP GLOBALS
+
+typedef struct _http_response
+{
+    char *data;
+    bool completed_successfully;
+    SemaphoreHandle_t done_sem;
+} http_response;
+
 const bool send_jpeg_encoded = false;
 
 // ML GLOBALS
@@ -197,11 +210,9 @@ void wifi_init()
 esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     static size_t cur_copied;
+    http_response *response = (http_response *)evt->user_data;
     switch (evt->event_id)
     {
-    case HTTP_EVENT_ERROR:
-        ESP_LOGE(HTTP_TAG, "ERROR");
-        break;
     case HTTP_EVENT_ON_CONNECTED:
         ESP_LOGI(HTTP_TAG, "CONNECTED");
         cur_copied = 0;
@@ -214,13 +225,25 @@ esp_err_t http_event_handler(esp_http_client_event_t *evt)
         break;
     case HTTP_EVENT_ON_DATA:
         ESP_LOGI(HTTP_TAG, "DATA RECEIVED, len=%d", evt->data_len);
-        if (!evt->user_data)
+        if (!response)
             break;
-        memcpy(((char *)evt->user_data) + cur_copied, evt->data, evt->data_len);
+        memcpy(response->data + cur_copied, evt->data, evt->data_len);
         cur_copied += evt->data_len;
         break;
     case HTTP_EVENT_ON_FINISH:
         ESP_LOGI(HTTP_TAG, "FINISHED");
+        if (!response)
+            break;
+        response->completed_successfully = true;
+        if (!response->done_sem)
+            break;
+        xSemaphoreGive(response->done_sem);
+        break;
+    case HTTP_EVENT_ERROR:
+        ESP_LOGE(HTTP_TAG, "ERROR");
+        if (!response || !response->done_sem)
+            break;
+        xSemaphoreGive(response->done_sem);
         break;
     case HTTP_EVENT_DISCONNECTED:
         ESP_LOGI(HTTP_TAG, "DISCONNECTED");
@@ -233,7 +256,7 @@ esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-void http_post(const char *host, int port, const char *path, char *data, size_t data_len, const char *content_type, char *response)
+esp_http_client_handle_t http_post(const char *host, int port, const char *path, char *data, size_t data_len, const char *content_type, http_response *response, bool async)
 {
     ESP_LOGW(HTTP_TAG, "POSTING DATA OF SIZE %u", data_len);
     esp_http_client_config_t config;
@@ -244,6 +267,12 @@ void http_post(const char *host, int port, const char *path, char *data, size_t 
     config.method = HTTP_METHOD_POST;
     config.event_handler = http_event_handler;
     config.user_data = response;
+    config.is_async = async;
+#if HTTPS
+    config.transport_type = HTTP_TRANSPORT_OVER_SSL;
+    config.auth_type = HTTP_AUTH_TYPE_BASIC;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
     // TODO: look into keeping the connection alive to save the redundancy of the TCP handhsake,
     // although it might not be needed when duty cycle sleep is incorporated
     config.keep_alive_enable = false;
@@ -252,9 +281,19 @@ void http_post(const char *host, int port, const char *path, char *data, size_t 
 
     esp_http_client_set_header(client, "Content-Type", content_type);
     esp_http_client_set_post_field(client, data, data_len);
-    esp_http_client_perform(client);
-
+    int ret = esp_http_client_perform(client);
+    if (ret == ESP_ERR_HTTP_EAGAIN)
+    {
+        // TODO: check why in async mode it always returns EAGAIN and doesn't work.
+        // After fixing, remove this whole EAGAIN verification as it should never return that normally
+        ESP_LOGE(HTTP_TAG, "EAGAIN error");
+        if (response && response->done_sem)
+            xSemaphoreGive(response->done_sem);
+    }
+    if (async)
+        return client;
     esp_http_client_cleanup(client);
+    return NULL;
 }
 
 // CAMERA FUNCTIONS
@@ -280,7 +319,7 @@ int camera_init(pixformat_t pixformat, framesize_t framesize)
     config.pixel_format = (pixformat_t)pixformat;
     config.frame_size = (framesize_t)framesize;
     config.fb_location = (camera_fb_location_t)CAMERA_FB_IN_DRAM;
-    config.grab_mode = (camera_grab_mode_t)CAMERA_GRAB_LATEST; // See difference from CAMERA_GRAB_WHEN_EMPTY
+    config.grab_mode = (camera_grab_mode_t)CAMERA_GRAB_LATEST;
     config.fb_count = (size_t)1;
     config.pin_sccb_scl = CAM_PIN_SCL;
     config.pin_vsync = CAM_PIN_VS;
@@ -357,7 +396,7 @@ void *avg_pool_rgb565(uint16_t *in, int height, int width, int kernel_size, bool
 
             if (convert_to_grayscale)
             {
-                uint8_t colorimetric_grasycale = (uint8_t)roundf(255.f * ((0.2126f * r / 31.f) + (0.7152 * g / 63.f) + (0.0722 * b / 31.f)));
+                uint8_t colorimetric_grasycale = (uint8_t)roundf(255.f * ((0.2126f * r / 31.f) + (0.7152f * g / 63.f) + (0.0722f * b / 31.f)));
                 ((uint8_t *)out)[(i / kernel_size) * out_width + (j / kernel_size)] = colorimetric_grasycale;
             }
             else
@@ -401,6 +440,11 @@ void *avg_pool_grayscale(uint8_t *in, int height, int width, int kernel_size)
 uint8_t *resize_bilinear_grayscale(uint8_t *in, int height, int width, int out_height, int out_width, dl::detect::result_t *face_pos)
 {
     uint8_t *out = (uint8_t *)malloc(out_height * out_width);
+    if (!out)
+    {
+        ESP_LOGE(CAM_TAG, "Failed to allocate %lu bytes of memory for resized image", out_height * out_width);
+        return NULL;
+    }
 
     for (int i = 0; i < out_height; i++)
     {
@@ -432,19 +476,20 @@ uint8_t *resize_bilinear_grayscale(uint8_t *in, int height, int width, int out_h
     return out;
 }
 
-float *extract_hog_features(uint8_t *in, int height, int width)
+void *extract_hog_features(uint8_t *in, int height, int width)
 {
     const int patch_size = HOG_PATCH_SIZE;
     const int num_bins = HOG_NUM_BINS;
     int delta = 180 / num_bins;
     int num_elements = (height / patch_size) * (width / patch_size) * num_bins;
 
-    float *hog = (float *)calloc(num_elements, sizeof(float));
-    if (!hog)
+    void *feature_vec = calloc(1 + num_elements * sizeof(float), 1); // 1 byte space for the class label
+    if (!feature_vec)
     {
-        ESP_LOGE(CAM_TAG, "Failed to allocate %lu bytes of memory for HOG", num_elements * sizeof(float));
+        ESP_LOGE(CAM_TAG, "Failed to allocate %lu bytes of memory for HOG", 1 + num_elements * sizeof(float));
         return NULL;
     }
+    float *hog = (float *)((uint8_t *)feature_vec + 1);
 
     for (int i = 0; i < height; i += patch_size)
     {
@@ -467,7 +512,9 @@ float *extract_hog_features(uint8_t *in, int height, int width)
                     pos_diff2 = i == height - 1 ? in[pos] : in[pos + width];
                     dy = in[pos_diff1] - in[pos_diff2];
 
-                    int grad = (int)roundf(fabsf(atan2f(dy, dx)) / M_PI * 180.f); // TODO: is this correct?
+                    float angle = atan2f(dy, dx); // returns result in [-PI, PI]
+                    angle = angle < 0.f ? angle + M_PI : angle;
+                    int grad = (int)roundf(angle / M_PI * 180.f);
                     int mag = (int)roundf(sqrtf(dx * dx + dy * dy));
                     int bin_angle = (grad / delta) * delta;
                     bin_angle = bin_angle == 180 ? bin_angle - delta : bin_angle;
@@ -488,7 +535,7 @@ float *extract_hog_features(uint8_t *in, int height, int width)
                 hog[bins_start + k] /= sqrtf(sqr_norm + 1e-6); // Done to avoid 0 division
         }
     }
-    return hog;
+    return feature_vec;
 }
 
 int camera_capture_image(HumanFaceDetectMSR01 *s1)
@@ -504,7 +551,7 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
     if (wifi_connected)
     {
 #if USE_FACE_DETECTION
-        // It doesn't work to use the pooled image for HumanFaceDetectMSR01 infering, because of this error:
+        // It doesn't work to use the pooled image for HumanFaceDetectMSR01 inference, because of this error:
         // assert failed: dl::Tensor<T>& dl::Tensor<T>::set_shape(std::vector<int>) [with T = short int] dl_variable.cpp:20 (shape[i] >= 0)
         // TODO: maybe look into it but it seems to be a bug with the library (maybe try different pooling shapes or something
         // but even with 60x60 and QQVGA it seems to complain, seems to not like small input sizes, as aspect ratio doesn't seem to matter)
@@ -517,7 +564,7 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
         if (candidates.size())
         {
             int32_t rect[4] = {candidates.front().box[0], candidates.front().box[1], candidates.front().box[2], candidates.front().box[3]};
-            http_post(HTTP_HOST, HTTP_PORT, "/debug/set_rect", (char *)rect, 4 * sizeof(uint32_t), "application/octet-stream", NULL);
+            http_post(HTTP_HOST, HTTP_PORT, "/debug/set_rect", (char *)rect, 4 * sizeof(uint32_t), "application/octet-stream", NULL, false);
         }
 #endif
         if (send_jpeg_encoded) // This makes the program run out of memory on next img, beware
@@ -527,15 +574,24 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
             // Convert image to JPEG
             frame2jpg_cb(fb, JPG_QUALITY, jpg_write_buf_cb, &params);
             // Send image to server
-            http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", jpg_img, params.img_len, "application/jpeg", NULL);
+            http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", jpg_img, params.img_len, "application/jpeg", NULL, false);
             free(jpg_img);
         }
         else
         {
             // Send image to server
-            http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)fb->buf, fb->len, "application/octet-stream", NULL);
+            http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)fb->buf, fb->len, "application/octet-stream", NULL, false);
         }
 #endif
+
+#if ASYNC_HTTP
+        SemaphoreHandle_t done_sem = xSemaphoreCreateBinary();
+#else
+        SemaphoreHandle_t done_sem = NULL;
+#endif
+
+        uint8_t class_label;
+        http_response response = {.data = (char *)&class_label, .completed_successfully = false, .done_sem = done_sem};
 
 #if USE_FACE_DETECTION
         if (!candidates.size())
@@ -549,29 +605,47 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
         uint8_t *pooled = (uint8_t *)avg_pool_rgb565((uint16_t *)fb->buf, fb->height, fb->width, POOL_KERNEL_SIZE, true);
         int height = fb->height / POOL_KERNEL_SIZE;
         int width = fb->width / POOL_KERNEL_SIZE;
-        // http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)pooled, height * width, "application/octet-stream", NULL)
+        // http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)pooled, height * width, "application/octet-stream", NULL, false);
         face.box[0] = face.box[0] < 0 ? 0 : face.box[0] / POOL_KERNEL_SIZE;
         face.box[1] = face.box[1] < 0 ? 0 : face.box[1] / POOL_KERNEL_SIZE;
         face.box[2] = face.box[2] > fb->width ? width : (int)(ceilf(face.box[2] / (float)POOL_KERNEL_SIZE));
         face.box[3] = face.box[3] > fb->height ? height : (int)(ceilf(face.box[3] / (float)POOL_KERNEL_SIZE));
 
+        // Send image to server to get target ground truth class
+        esp_http_client_handle_t client = http_post(HTTP_HOST, HTTP_PORT, "/predict", (char *)pooled, height * width, "application/octet-stream", &response, ASYNC_HTTP);
+
         uint8_t *resized = resize_bilinear_grayscale(pooled, height, width, FACE_SIZE, FACE_SIZE, &face);
         free(pooled);
 #else
+        // Downsize image before sending
         uint8_t *pooled = (uint8_t *)avg_pool_grayscale((uint8_t *)fb->buf, fb->height, fb->width, POOL_KERNEL_SIZE);
         int height = fb->height / POOL_KERNEL_SIZE;
         int width = fb->width / POOL_KERNEL_SIZE;
+        // Send image to server to get target ground truth class
+        esp_http_client_handle_t client = http_post(HTTP_HOST, HTTP_PORT, "/predict", (char *)pooled, height * width, "application/octet-stream", &response, ASYNC_HTTP);
 
         uint8_t *resized = resize_bilinear_grayscale(pooled, height, width, FACE_SIZE, FACE_SIZE, NULL);
         free(pooled);
 #endif
 #if DEBUG_SHOW_FACE
-        http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)resized, FACE_SIZE * FACE_SIZE, "application/octet-stream", NULL);
+        http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)resized, FACE_SIZE * FACE_SIZE, "application/octet-stream", NULL, false);
 #endif
-        float *hog = extract_hog_features(resized, FACE_SIZE, FACE_SIZE);
+        void *feature_vec = extract_hog_features(resized, FACE_SIZE, FACE_SIZE);
         free(resized);
-        xQueueSend(feats_queue, hog, portMAX_DELAY);
-        free(hog);
+        // Wait for response to complete if async
+#if ASYNC_HTTP
+        xSemaphoreTake(done_sem, portMAX_DELAY);
+        vSemaphoreDelete(done_sem);
+#endif
+        if (client)
+            esp_http_client_cleanup(client);
+        if (response.completed_successfully)
+        {
+            *((uint8_t *)feature_vec) = class_label;
+            xQueueSend(feats_queue, feature_vec, portMAX_DELAY);
+        }
+
+        free(feature_vec);
     }
     // Return the frame buffer back to the driver for reuse
     esp_camera_fb_return(fb);
@@ -608,6 +682,9 @@ void activation_forward(float *in, int size, activation act)
         case SIGMOID:
             in[i] = 1.f / (1.f + expf(-in[i]));
             break;
+        case TANH:
+            in[i] = tanhf(in[i]);
+            break;
         }
     }
 }
@@ -624,6 +701,9 @@ void activation_backward(float *grads, float *output, int size, activation act)
         case SIGMOID:
             grads[i] = grads[i] * (1 - output[i]) * output[i];
             break;
+        case TANH:
+            grads[i] = grads[i] * (1 - output[i] * output[i]);
+            break;
         }
     }
 }
@@ -633,7 +713,7 @@ float cross_entropy_with_logits(float *in, int target)
     float softmax_denom_sum = 0.f;
     for (int j = 0; j < NUM_CLASSES; j++)
         softmax_denom_sum += expf(in[j]);
-    return softmax_denom_sum - in[target];
+    return logf(softmax_denom_sum) - in[target];
 }
 
 float *backprop_cross_entropy(float *out, int target)
@@ -650,9 +730,11 @@ float *backprop_cross_entropy(float *out, int target)
     return grads;
 }
 
+// TODO: sometimes it seems to diverge to inf and then NaN, maybe it's just the learning rate or the activation function
 void train_task(void *arg)
 {
-    static float feats[FEATS_LEN];
+    static char feature_vec[1 + FEATS_LEN * sizeof(float)];
+    float *feats = (float *)(feature_vec + 1);
 #if TWO_LAYER_NN
     static float w1[FEATS_LEN * HIDDEN_LAYER_SIZE];
     static float b1[HIDDEN_LAYER_SIZE] = {0};
@@ -684,8 +766,10 @@ void train_task(void *arg)
 
     for (int step = 0;; step++)
     {
-        xQueueReceive(feats_queue, feats, portMAX_DELAY);
-        int target = 0; // TODO: replace with target sent from server (should be first in the queue)
+        xQueueReceive(feats_queue, feature_vec, portMAX_DELAY);
+        uint8_t target = *((uint8_t *)feature_vec);
+
+        ESP_LOGW(ML_TAG, "Received target is %d", (int)target);
 
         // Forward pass
 #if TWO_LAYER_NN
@@ -764,7 +848,7 @@ extern "C" void app_main(void)
     // ML
     HumanFaceDetectMSR01 s1(0.1F, 0.5F, 1, 0.2F); // TODO: make these defines and find the sweet spot
 
-    feats_queue = xQueueCreate(1, FEATS_LEN * sizeof(float));
+    feats_queue = xQueueCreate(1, 1 + FEATS_LEN * sizeof(float));
 
     // TODO: look into how much is used to set stack size accodringly (especially for camera task)
     xTaskCreate(train_task, "train_task", configMINIMAL_STACK_SIZE + 1000, NULL, 1, NULL);

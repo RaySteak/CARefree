@@ -8,6 +8,10 @@ from transformers import AutoImageProcessor, AutoModelForImageClassification, Vi
 from PIL import Image
 from io import BytesIO
 
+DEBUG_MODE = False
+USE_HTTPS = False
+PORT = 5000
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 processor = AutoImageProcessor.from_pretrained("dima806/facial_emotions_image_detection")
@@ -16,25 +20,19 @@ model.eval()
 
 labels_list = ['sad', 'disgust', 'angry', 'neutral', 'fear', 'surprise', 'happy']
 
-# input = np.zeros((320, 240, 3))
-# input = processor(input)
-# print(input['pixel_values'][0].shape)
+class LoggingMiddleware(object):
+    def __init__(self, app):
+        self._app = app
 
-# print(type(model))
+    def __call__(self, env, resp):
+        errorlog = env['wsgi.errors']
+        pprint.pprint(('REQUEST', env), stream=errorlog)
 
-# class LoggingMiddleware(object):
-#     def __init__(self, app):
-#         self._app = app
+        def log_response(status, headers, *args):
+            pprint.pprint(('RESPONSE', status, headers), stream=errorlog)
+            return resp(status, headers, *args)
 
-#     def __call__(self, env, resp):
-#         errorlog = env['wsgi.errors']
-#         pprint.pprint(('REQUEST', env), stream=errorlog)
-
-#         def log_response(status, headers, *args):
-#             pprint.pprint(('RESPONSE', status, headers), stream=errorlog)
-#             return resp(status, headers, *args)
-
-#         return self._app(env, log_response)
+        return self._app(env, log_response)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024
@@ -102,7 +100,7 @@ def extract_image(data, content_type):
     return img
 
 @app.route('/debug/set_image', methods = ['POST'])
-def embed_photo():
+def debug_set_image():
     global debug_rect
     img = extract_image(request.data, request.headers['Content-Type'])
     plt.imshow(img)
@@ -121,8 +119,24 @@ def embed_photo():
     feats_bytes = feats.squeeze(0).cpu().detach().numpy().tobytes()
     print("FIFTH VALUE IS ", feats[:, 5][0].item())
     print(class_name)
-    return feats_bytes
+    return class_name
+
+@app.route('/predict', methods = ['POST'])
+def predict():
+    img = extract_image(request.data, request.headers['Content-Type'])
+    img = torch.Tensor(processor(img)['pixel_values'][0]).to(device)[None, :]
+    with torch.no_grad():
+        out = model.vit(img)
+        feats = out[0][:, 0, :]
+        logits = model.classifier(feats).squeeze(0)
+        class_idx = torch.argmax(logits).item() 
+        print(f"CLASS IDX IS {class_idx} ({labels_list[class_idx]})")
+    return class_idx.to_bytes(1, 'little')
 
 if __name__ == '__main__':
-    # app.wsgi_app = LoggingMiddleware(app.wsgi_app)
-    app.run(host = '0.0.0.0', threaded = True, port = 5000)
+    if DEBUG_MODE:
+        app.wsgi_app = LoggingMiddleware(app.wsgi_app)
+    if USE_HTTPS:
+        app.run(host = '0.0.0.0', threaded = True, port = PORT, ssl_context = 'adhoc')
+    else:
+        app.run(host = '0.0.0.0', threaded = True, port = PORT)

@@ -35,6 +35,17 @@ tinkering with tensorflow lite micro and the model wouldn't learn much anyway.
 be to use some very toned-down HoG-style features
 - For classifier, it would be ideal to use a one-layer NN, but that might be too big.
 
+Further optimizations:
+- Tried using async http requests. The ESP library only supports them if HTTPS is used. To avoid using a proper
+certificate these variables have to be set in sdkconfig: 'CONFIG_ESP_TLS_INSECURE=y' and
+'CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y'. Still, the request doesn't work and returns only 'EAGAIN' immediately
+every time upon performing the request. Spent a lot of time trying to debug to see what is wrong but to no avail.
+At first thought it was a bug having to do with the combination of async and disabled verification, but the issue
+is even weirder because it still doesn't work even with verification enabled. Doesn't help that the function
+doesn't print any further information. It's weird that even when trying to use async with HTTPS which should
+print an error as it's not possible (checked source code and that's what it should to), nothing is printed and
+it just works synchronously.
+
 
 General consensus: An ESP32-CAM featuring the PSRAM (also known as SPIRAM) module would have been able to achieve
 much more, and way fewer compromises would have been made
