@@ -52,4 +52,5 @@ much more, and way fewer compromises would have been made
 MQTT:
 - QOS 2 is the best option. QOS 1 would be the worst because we don't want to send
 duplicate weights for sure. QOS 0 would also work but since the board worked so hard to update the weights anyway,
-let's make sure they get to the server.
+let's make sure they get to the server. Problem is, with QOS 1 and 2, the outbound messages are stored in an
+outbox until sent which uses up too much memory, so we will make do with QOS 0.

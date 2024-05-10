@@ -87,8 +87,8 @@
 #define HTTP_PORT 5000
 
 // MQTT DEFINES
-
-#define MQTT_QOS 2
+// Beware, with QOS 1 and 2, the messages are stored in the outbox which uses up more RAM
+#define MQTT_QOS 0
 
 // ML DEFINES
 
@@ -884,8 +884,6 @@ void train_task(void *arg)
         if ((step + 1) % EPOCHS_PER_ROUND)
             continue;
         // Send weights through MQTT
-        // TODO: this currently triggers the error "outbox: outbox_enqueue(53): Memory exhausted"
-        // Find a way to send the weights without running out of memory
         int msg_id = esp_mqtt_client_publish(client, mqtt_topic, (const char *)model, sizeof(model), MQTT_QOS, 0);
         ESP_LOGI(MQTT_TAG, "Published model, msg_id=%d", msg_id);
     }
