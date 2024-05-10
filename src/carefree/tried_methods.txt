@@ -48,3 +48,8 @@ So the issue is probably a bug of the implementation for the heltec lora v3 boar
 
 General consensus: An ESP32-CAM featuring the PSRAM (also known as SPIRAM) module would have been able to achieve
 much more, and way fewer compromises would have been made
+
+MQTT:
+- QOS 2 is the best option. QOS 1 would be the worst because we don't want to send
+duplicate weights for sure. QOS 0 would also work but since the board worked so hard to update the weights anyway,
+let's make sure they get to the server.

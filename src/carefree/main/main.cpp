@@ -86,6 +86,10 @@
 #define HTTP_HOST "192.168.24.26" // Server domain/address and port here
 #define HTTP_PORT 5000
 
+// MQTT DEFINES
+
+#define MQTT_QOS 2
+
 // ML DEFINES
 
 // feature extraction
@@ -117,13 +121,16 @@ typedef enum _activation
 #define LEARNING_RATE 0.01f
 #define ACTIVATION RELU
 
+#define EPOCHS_PER_ROUND 10
+
 // TAGS
 
-const char *APP_TAG = "CARefree";
-const char *WIFI_TAG = "WiFi";
-const char *HTTP_TAG = "HTTP";
-const char *CAM_TAG = "Camera";
-const char *ML_TAG = "Train";
+const char *const APP_TAG = "CARefree";
+const char *const WIFI_TAG = "WiFi";
+const char *const HTTP_TAG = "HTTP";
+const char *const MQTT_TAG = "MQTT";
+const char *const CAM_TAG = "Camera";
+const char *const ML_TAG = "Train";
 
 // CAMERA GLOBALS
 
@@ -135,8 +142,8 @@ typedef struct _jpg_encode_cb_params
 
 // WIFI GLOBALS
 
-const char *ssid = "OnePlus Nord"; // WiFi credentials here
-const char *pass = "ayylmao123";
+const char *const ssid = "OnePlus Nord"; // WiFi credentials here
+const char *const pass = "ayylmao123";
 bool wifi_connected = false;
 
 // HTTP GLOBALS
@@ -150,12 +157,25 @@ typedef struct _http_response
 
 const bool send_jpeg_encoded = false;
 
+// MQTT GLOBALS
+
+esp_mqtt_client_handle_t client;
+bool mqtt_connected = 0;
+
+extern const char *mqtt_root_ca_cert;
+extern const char *mqtt_cert;
+extern const char *mqtt_privkey;
+extern const char *mqtt_aws_uri;
+extern const char *mqtt_client_id;
+
+const char *const mqtt_topic = "aggregate_weights";
+
 // ML GLOBALS
 QueueHandle_t feats_queue = NULL;
 
 // WIFI FUNCTIONS
 
-static void wifi_event_handler(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+void wifi_event_handler(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     static int retry_num = 0;
 
@@ -288,6 +308,44 @@ esp_http_client_handle_t http_post(const char *host, int port, const char *path,
         return client;
     esp_http_client_cleanup(client);
     return NULL;
+}
+
+// MQTT
+
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
+    if (event->event_id == MQTT_EVENT_CONNECTED)
+    {
+        ESP_LOGI(MQTT_TAG, "MQTT_EVENT_CONNECTED");
+        mqtt_connected = 1;
+    }
+    else if (event->event_id == MQTT_EVENT_DISCONNECTED)
+    {
+        ESP_LOGI(MQTT_TAG, "MQTT_EVENT_DISCONNECTED");
+        mqtt_connected = 0;
+    }
+    else if (event->event_id == MQTT_EVENT_ERROR)
+    {
+        ESP_LOGD(MQTT_TAG, "MQTT_EVENT_ERROR");
+    }
+}
+
+static int mqtt_initialize(void)
+{
+    esp_mqtt_client_config_t mqtt_cfg;
+    memset(&mqtt_cfg, 0, sizeof(mqtt_cfg));
+    mqtt_cfg.broker.address.uri = mqtt_aws_uri;
+    mqtt_cfg.broker.verification.certificate = mqtt_root_ca_cert;
+    mqtt_cfg.credentials.authentication.certificate = mqtt_cert;
+    mqtt_cfg.credentials.authentication.key = mqtt_privkey;
+    mqtt_cfg.credentials.client_id = mqtt_client_id;
+    client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_register_event(client, MQTT_EVENT_ANY, mqtt_event_handler, NULL);
+    int err = esp_mqtt_client_start(client);
+    if (err != ESP_OK)
+        ESP_LOGE(MQTT_TAG, "MQTT START ERROR");
+    return err;
 }
 
 // CAMERA FUNCTIONS
@@ -734,17 +792,19 @@ void train_task(void *arg)
     static char feature_vec[1 + FEATS_LEN * sizeof(float)];
     float *feats = (float *)(feature_vec + 1);
 #if TWO_LAYER_NN
-    static float w1[FEATS_LEN * HIDDEN_LAYER_SIZE];
-    static float b1[HIDDEN_LAYER_SIZE] = {0};
-    static float w2[HIDDEN_LAYER_SIZE * NUM_CLASSES];
-    static float b2[NUM_CLASSES] = {0};
+    static float model[HIDDEN_LAYER_SIZE * (FEATS_LEN + NUM_CLASSES + 1) + NUM_CLASSES] = {0};
+    float *const w1 = model;
+    float *const b1 = w1 + HIDDEN_LAYER_SIZE * FEATS_LEN;
+    float *const w2 = b1 + HIDDEN_LAYER_SIZE;
+    float *const b2 = w2 + HIDDEN_LAYER_SIZE * NUM_CLASSES;
     float *const weights[] = {w1, w2};
     float *const biases[] = {b1, b2};
     const int layer_sizes[] = {FEATS_LEN, HIDDEN_LAYER_SIZE, NUM_CLASSES};
     const int num_layers = 2;
 #else
-    static float w[FEATS_LEN * NUM_CLASSES];
-    static float b[FEATS_LEN] = {0};
+    static float model[NUM_CLASSES * (FEATS_LEN + 1)] = {0};
+    float *const w = model;
+    float *const b = w + FEATS_LEN * NUM_CLASSES;
     float *const weights[] = {w};
     float *const biases[] = {b};
     const int layer_sizes[] = {FEATS_LEN, NUM_CLASSES};
@@ -820,6 +880,14 @@ void train_task(void *arg)
         for (int j = 0; j < NUM_CLASSES; j++)
             biases[0][j] -= LEARNING_RATE * grads_first[j];
         free(grads_first);
+
+        if ((step + 1) % EPOCHS_PER_ROUND)
+            continue;
+        // Send weights through MQTT
+        // TODO: this currently triggers the error "outbox: outbox_enqueue(53): Memory exhausted"
+        // Find a way to send the weights without running out of memory
+        int msg_id = esp_mqtt_client_publish(client, mqtt_topic, (const char *)model, sizeof(model), MQTT_QOS, 0);
+        ESP_LOGI(MQTT_TAG, "Published model, msg_id=%d", msg_id);
     }
 }
 
@@ -833,6 +901,9 @@ extern "C" void app_main(void)
     // WiFi
     nvs_flash_init();
     wifi_init();
+
+    // MQTT
+    mqtt_initialize();
 
     // Camera
     ret = camera_init(PIXFORMAT, FRAMESIZE);
