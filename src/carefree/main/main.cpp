@@ -168,10 +168,18 @@ extern const char *mqtt_privkey;
 extern const char *mqtt_aws_uri;
 extern const char *mqtt_client_id;
 
-const char *const mqtt_topic = "aggregate_weights";
+const char *const mqtt_post_topic = "post_weights";
+const char *const mqtt_get_topic = "get_weights";
 
 // ML GLOBALS
 QueueHandle_t feats_queue = NULL;
+#if TWO_LAYER_NN
+static float model[HIDDEN_LAYER_SIZE * (FEATS_LEN + NUM_CLASSES + 1) + NUM_CLASSES] = {0};
+#else
+static float model[NUM_CLASSES * (FEATS_LEN + 1)] = {0};
+#endif
+SemaphoreHandle_t model_lock = NULL;
+SemaphoreHandle_t weights_received = NULL;
 
 // WIFI FUNCTIONS
 
@@ -315,19 +323,37 @@ esp_http_client_handle_t http_post(const char *host, int port, const char *path,
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
-    if (event->event_id == MQTT_EVENT_CONNECTED)
+    esp_mqtt_client_handle_t client = event->client;
+
+    switch (event->event_id)
     {
-        ESP_LOGI(MQTT_TAG, "MQTT_EVENT_CONNECTED");
-        mqtt_connected = 1;
-    }
-    else if (event->event_id == MQTT_EVENT_DISCONNECTED)
-    {
-        ESP_LOGI(MQTT_TAG, "MQTT_EVENT_DISCONNECTED");
-        mqtt_connected = 0;
-    }
-    else if (event->event_id == MQTT_EVENT_ERROR)
-    {
-        ESP_LOGD(MQTT_TAG, "MQTT_EVENT_ERROR");
+    case MQTT_EVENT_CONNECTED:
+        ESP_LOGI(MQTT_TAG, "CONNECTED");
+        esp_mqtt_client_subscribe(client, mqtt_get_topic, MQTT_QOS);
+        mqtt_connected = true;
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        ESP_LOGE(MQTT_TAG, "DISCONNECTED");
+        mqtt_connected = false;
+        // To make sure train task doesn't get stuck waiting for weights
+        xSemaphoreGive(weights_received);
+        break;
+    case MQTT_EVENT_DATA:
+        ESP_LOGI(MQTT_TAG, "DATA RECEIVED");
+        xSemaphoreTake(model_lock, portMAX_DELAY);
+        memcpy(model + event->current_data_offset, event->data, event->data_len);
+        if (event->current_data_offset + event->data_len == event->total_data_len)
+        {
+            ESP_LOGI(MQTT_TAG, "MODEL FULLY RECEIVED");
+            xSemaphoreGive(weights_received);
+        }
+        xSemaphoreGive(model_lock);
+        break;
+    case MQTT_EVENT_ERROR:
+        ESP_LOGE(MQTT_TAG, "ERROR");
+        break;
+    default:
+        break;
     }
 }
 
@@ -792,7 +818,6 @@ void train_task(void *arg)
     static char feature_vec[1 + FEATS_LEN * sizeof(float)];
     float *feats = (float *)(feature_vec + 1);
 #if TWO_LAYER_NN
-    static float model[HIDDEN_LAYER_SIZE * (FEATS_LEN + NUM_CLASSES + 1) + NUM_CLASSES] = {0};
     float *const w1 = model;
     float *const b1 = w1 + HIDDEN_LAYER_SIZE * FEATS_LEN;
     float *const w2 = b1 + HIDDEN_LAYER_SIZE;
@@ -802,7 +827,6 @@ void train_task(void *arg)
     const int layer_sizes[] = {FEATS_LEN, HIDDEN_LAYER_SIZE, NUM_CLASSES};
     const int num_layers = 2;
 #else
-    static float model[NUM_CLASSES * (FEATS_LEN + 1)] = {0};
     float *const w = model;
     float *const b = w + FEATS_LEN * NUM_CLASSES;
     float *const weights[] = {w};
@@ -826,8 +850,10 @@ void train_task(void *arg)
     {
         xQueueReceive(feats_queue, feature_vec, portMAX_DELAY);
         uint8_t target = *((uint8_t *)feature_vec);
-
         ESP_LOGW(ML_TAG, "Received target is %d", (int)target);
+
+        // Lock model before updating
+        xSemaphoreTake(model_lock, portMAX_DELAY);
 
         // Forward pass
 #if TWO_LAYER_NN
@@ -880,18 +906,29 @@ void train_task(void *arg)
         for (int j = 0; j < NUM_CLASSES; j++)
             biases[0][j] -= LEARNING_RATE * grads_first[j];
         free(grads_first);
+        // Unlock model after updating is done
+        xSemaphoreTake(model_lock, portMAX_DELAY);
 
         if ((step + 1) % EPOCHS_PER_ROUND)
             continue;
         // Send weights through MQTT
-        int msg_id = esp_mqtt_client_publish(client, mqtt_topic, (const char *)model, sizeof(model), MQTT_QOS, 0);
+        int msg_id = esp_mqtt_client_publish(client, mqtt_post_topic, (const char *)model, sizeof(model), MQTT_QOS, 0);
         ESP_LOGI(MQTT_TAG, "Published model, msg_id=%d", msg_id);
+        // Wait for aggregate weights to come back
+        if (msg_id != -1 && mqtt_connected)
+        {
+            xSemaphoreTake(weights_received, portMAX_DELAY);
+            ESP_LOGI(ML_TAG, "Weights received");
+        }
     }
 }
 
 extern "C" void app_main(void)
 {
     int ret;
+
+    weights_received = xSemaphoreCreateBinary();
+    model_lock = xSemaphoreCreateMutex();
 
     // Get free heap memory
     ESP_LOGI(APP_TAG, "Free heap memory: %lu bytes", esp_get_free_heap_size());
@@ -905,7 +942,6 @@ extern "C" void app_main(void)
 
     // Camera
     ret = camera_init(PIXFORMAT, FRAMESIZE);
-
     if (ret != 0)
     {
         ESP_LOGE("init_camera", "Camera Init Failed");
@@ -918,7 +954,7 @@ extern "C" void app_main(void)
     feats_queue = xQueueCreate(1, 1 + FEATS_LEN * sizeof(float));
 
     // TODO: look into how much is used to set stack size accodringly (especially for camera task)
-    xTaskCreate(train_task, "train_task", configMINIMAL_STACK_SIZE + 1000, NULL, 1, NULL);
+    xTaskCreate(train_task, "train_task", configMINIMAL_STACK_SIZE + 2000, NULL, 1, NULL);
 
     // TODO: move this to task and delete main task
     while (1)
