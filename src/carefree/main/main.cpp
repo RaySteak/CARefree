@@ -25,6 +25,7 @@
 #define DEBUG_SHOW_IMAGE 0
 #define DEBUG_SHOW_FACE 1
 #define DEBUG_PRINT_LOSS 1
+#define DEBUG_NO_BLOCK_UNRECEIVED_MODEL 1
 
 // CONFIG DEFINES
 #define USE_FACE_DETECTION 0
@@ -342,8 +343,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         // but we don't need to do anything either, as we can keep the model receiving
         // flag as true, so the train task will continue to wait for the model.
 
+#if DEBUG_NO_BLOCK_UNRECEIVED_MODEL
         // To make sure train task doesn't get stuck waiting for weights
+        ESP_LOGW(MQTT_TAG, "WE GIVE THE SEMAPHORE");
         xSemaphoreGive(weights_received);
+#endif
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(MQTT_TAG, "DATA RECEIVED");
@@ -824,9 +828,13 @@ float *backprop_cross_entropy(float *out, int target)
 // TODO: sometimes it seems to diverge to inf and then NaN, maybe it's just the learning rate or the activation function
 void train_task(void *arg)
 {
+    int msg_id;
     static char feature_vec[1 + FEATS_LEN * sizeof(float)];
     float *feats = (float *)(feature_vec + 1);
+    float *grads_out, *grads_first;
+    float loss;
 #if TWO_LAYER_NN
+    float *hidden;
     float *const w1 = model;
     float *const b1 = w1 + HIDDEN_LAYER_SIZE * FEATS_LEN;
     float *const w2 = b1 + HIDDEN_LAYER_SIZE;
@@ -862,18 +870,23 @@ void train_task(void *arg)
         ESP_LOGW(ML_TAG, "Received target is %d", (int)target);
 
         // Lock model before updating
+        ESP_LOGW(MQTT_TAG, "WE WAIT FOR THE MODEL");
         xSemaphoreTake(model_lock, portMAX_DELAY);
         if (currently_receiving_model)
         {
             ESP_LOGW(ML_TAG, "Model is currently being updated, skipping this step");
             step = (step / EPOCHS_PER_ROUND) * EPOCHS_PER_ROUND - 1; // Reset step to the beginning of the current round
             xSemaphoreGive(model_lock);
+#if DEBUG_NO_BLOCK_UNRECEIVED_MODEL
             continue;
+#else
+            goto wait_for_model;
+#endif
         }
 
         // Forward pass
 #if TWO_LAYER_NN
-        float *hidden = (float *)malloc(HIDDEN_LAYER_SIZE * sizeof(float));
+        hidden = (float *)malloc(HIDDEN_LAYER_SIZE * sizeof(float));
         linear_forward(feats, w1, b1, FEATS_LEN, HIDDEN_LAYER_SIZE, hidden);
         activation_forward(hidden, HIDDEN_LAYER_SIZE, ACTIVATION);
         linear_forward(hidden, w2, b2, HIDDEN_LAYER_SIZE, NUM_CLASSES, out);
@@ -881,18 +894,18 @@ void train_task(void *arg)
         linear_forward(feats, w, b, FEATS_LEN, NUM_CLASSES, out);
 #endif
 #if DEBUG_PRINT_LOSS
-        float loss = cross_entropy_with_logits(out, target);
+        loss = cross_entropy_with_logits(out, target);
         ESP_LOGI(ML_TAG, "Step %d, Loss=%f", step, loss);
 #endif
         // Backprop and gradient descent
         // Computing the output loss or logits is optional, the formula just needs the logits from the last layer
-        float *grads_out = backprop_cross_entropy(out, target);
+        grads_out = backprop_cross_entropy(out, target);
         // The gradients for the weights are one vector outer product away. We can apply backpropagation directly without
         // storing them, thus saving memory. Even with a second layer, we can first apply gradient descent on the current layer
         // while also computing the gradients for the input of the layer and then continue with backpropagation on the next layer.
 #if TWO_LAYER_NN
         // updating gradients of second layer and computing gradients for hidden layer (also known as first layer)
-        float *grads_first = (float *)malloc(HIDDEN_LAYER_SIZE * sizeof(float));
+        grads_first = (float *)malloc(HIDDEN_LAYER_SIZE * sizeof(float));
         for (int i = 0; i < HIDDEN_LAYER_SIZE; i++)
         {
             grads_first[i] = 0.f;
@@ -911,7 +924,7 @@ void train_task(void *arg)
         free(hidden);
 #else
         // The gradients of first layer and of the output layer are one and the same
-        float *grads_first = grads_out;
+        grads_first = grads_out;
 #endif
         // Updating gradients for first layer
         for (int i = 0; i < layer_sizes[0]; i++)
@@ -923,19 +936,23 @@ void train_task(void *arg)
             biases[0][j] -= LEARNING_RATE * grads_first[j];
         free(grads_first);
         // Unlock model after updating is done
-        xSemaphoreTake(model_lock, portMAX_DELAY);
+        xSemaphoreGive(model_lock);
 
         if ((step + 1) % EPOCHS_PER_ROUND)
             continue;
         // Send weights through MQTT
-        int msg_id = esp_mqtt_client_publish(client, mqtt_post_topic, (const char *)model, sizeof(model), MQTT_QOS, 0);
+        msg_id = esp_mqtt_client_publish(client, mqtt_post_topic, (const char *)model, sizeof(model), MQTT_QOS, 0);
         ESP_LOGI(MQTT_TAG, "Published model, msg_id=%d", msg_id);
+#if DEBUG_NO_BLOCK_UNRECEIVED_MODEL
+        if (msg_id == -1 || !mqtt_connected)
+            continue;
+#else
         // Wait for aggregate weights to come back
-        if (msg_id != -1 && mqtt_connected)
-        {
-            xSemaphoreTake(weights_received, portMAX_DELAY);
-            ESP_LOGI(ML_TAG, "Weights received");
-        }
+    wait_for_model:
+#endif
+        ESP_LOGW(MQTT_TAG, "WE WAIT FOR THE SEMAPHORE");
+        xSemaphoreTake(weights_received, portMAX_DELAY);
+        ESP_LOGI(ML_TAG, "Weights received");
     }
 }
 
