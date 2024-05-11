@@ -867,7 +867,7 @@ void train_task(void *arg)
         {
             ESP_LOGW(ML_TAG, "Model is currently being updated, skipping this step");
             step = (step / EPOCHS_PER_ROUND) * EPOCHS_PER_ROUND - 1; // Reset step to the beginning of the current round
-            xSemaphoreGive(model_lock, portMAX_DELAY);
+            xSemaphoreGive(model_lock);
             continue;
         }
 
