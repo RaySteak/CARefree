@@ -180,6 +180,7 @@ static float model[NUM_CLASSES * (FEATS_LEN + 1)] = {0};
 #endif
 SemaphoreHandle_t model_lock = NULL;
 SemaphoreHandle_t weights_received = NULL;
+bool currently_receiving_model = false;
 
 // WIFI FUNCTIONS
 
@@ -334,17 +335,25 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGE(MQTT_TAG, "DISCONNECTED");
-        mqtt_connected = false;
+        // We don't need a flag to check if model is corrupted:
+        // If model was received successfully, model receiving flag is already false,
+        // and we don't need to do anything.
+        // If model was in the process of being received, it is now corrupted,
+        // but we don't need to do anything either, as we can keep the model receiving
+        // flag as true, so the train task will continue to wait for the model.
+
         // To make sure train task doesn't get stuck waiting for weights
         xSemaphoreGive(weights_received);
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(MQTT_TAG, "DATA RECEIVED");
         xSemaphoreTake(model_lock, portMAX_DELAY);
-        memcpy(model + event->current_data_offset, event->data, event->data_len);
+        currently_receiving_model = true;
+        memcpy((uint8_t *)model + event->current_data_offset, event->data, event->data_len);
         if (event->current_data_offset + event->data_len == event->total_data_len)
         {
             ESP_LOGI(MQTT_TAG, "MODEL FULLY RECEIVED");
+            currently_receiving_model = false;
             xSemaphoreGive(weights_received);
         }
         xSemaphoreGive(model_lock);
@@ -854,6 +863,13 @@ void train_task(void *arg)
 
         // Lock model before updating
         xSemaphoreTake(model_lock, portMAX_DELAY);
+        if (currently_receiving_model)
+        {
+            ESP_LOGW(ML_TAG, "Model is currently being updated, skipping this step");
+            step = (step / EPOCHS_PER_ROUND) * EPOCHS_PER_ROUND - 1; // Reset step to the beginning of the current round
+            xSemaphoreGive(model_lock, portMAX_DELAY);
+            continue;
+        }
 
         // Forward pass
 #if TWO_LAYER_NN

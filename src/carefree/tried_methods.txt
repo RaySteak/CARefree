@@ -54,3 +54,7 @@ MQTT:
 duplicate weights for sure. QOS 0 would also work but since the board worked so hard to update the weights anyway,
 let's make sure they get to the server. Problem is, with QOS 1 and 2, the outbound messages are stored in an
 outbox until sent which uses up too much memory, so we will make do with QOS 0.
+- To make sure model doesn't get updated during gradient descent and vice-versa, synchronization is used. This is
+done optimally (from the prerspective of both code size and efficiency) and explained in the code through comments
+(see MQTT event handler and train task sections). Currently, for choice of simplicity, images received during model
+update are just discarded (IDEA: while model is being updated, stop taking photos and basically halt all code).
