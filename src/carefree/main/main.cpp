@@ -447,7 +447,11 @@ size_t jpg_write_buf_cb(void *arg, size_t index, const void *data, size_t len)
     return len;
 }
 
-// TODO: why does this not work with average pooling but works when picking the first value in the kernel??????
+inline uint16_t flip_endianness_16(uint16_t in)
+{
+    return (in << 8) | (in >> 8);
+}
+
 void *avg_pool_rgb565(uint16_t *in, int height, int width, int kernel_size, bool convert_to_grayscale)
 {
     int out_height = height / kernel_size;
@@ -470,20 +474,16 @@ void *avg_pool_rgb565(uint16_t *in, int height, int width, int kernel_size, bool
             {
                 for (int bj = 0; bj < kernel_size; bj++)
                 {
-                    uint16_t pixel = in[(i + bi) * width + j + bj];
+                    // Because pixels in RGB565 are actually big endian, we need to swap the bytes
+                    uint16_t pixel = flip_endianness_16(in[(i + bi) * width + j + bj]);
                     sum[0] += (pixel >> 11);
                     sum[1] += ((pixel >> 5) & 0b111111);
                     sum[2] += (pixel & 0b11111);
-                    // break;
                 }
-                // break;
             }
             uint16_t r = (uint16_t)roundf(sum[0] / (kernel_size * kernel_size));
             uint16_t g = (uint16_t)roundf(sum[1] / (kernel_size * kernel_size));
             uint16_t b = (uint16_t)roundf(sum[2] / (kernel_size * kernel_size));
-            // uint16_t r = (uint16_t)sum[0];
-            // uint16_t g = (uint16_t)sum[1];
-            // uint16_t b = (uint16_t)sum[2];
 
             if (convert_to_grayscale)
             {
@@ -492,7 +492,8 @@ void *avg_pool_rgb565(uint16_t *in, int height, int width, int kernel_size, bool
             }
             else
             {
-                ((uint16_t *)out)[(i / kernel_size) * out_width + (j / kernel_size)] = (r << 11) | (g << 5) | b;
+                // Again, we need to swap the bytes before storing the pixel
+                ((uint16_t *)out)[(i / kernel_size) * out_width + (j / kernel_size)] = flip_endianness_16((r << 11) | (g << 5) | b);
             }
         }
     }
