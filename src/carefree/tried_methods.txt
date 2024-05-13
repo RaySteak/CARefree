@@ -12,13 +12,20 @@ grayscale would be preferable, but the built-in MSR model takes as input 3-chann
 we will choose RGB565 QVGA and grayscale it before sending to the edge (combined with jpg
 conversion and/or further downscaling)
 - It seems that with QVGA RGB565, applying 4-size average pooling causes very bad noise artifacts,
-and just picking the top-left value is preferable and yields better results.
+and just picking the top-left value is preferable and yields better results (fixed, look 2 bullet
+points ahead and in the avg_pool_rgb565 for explanation of bug).
 - Well, as it turns out, the camera can also do QQVGA (160 * 240). Since we were already doing
 downscaling to QQQVGA (with 4-size pooling kernel), and having the impossibility to send QQVGA
 images to the server it would require too much RAM storing both a QVGA and QQVGA image, we will
 pick QQVGA as the resolution of choice. Problem is, the built-in face detection model still doesn't
 like to receive QVGA as input as it is too small for it (input aspect ratio or shape doesn't seem
 to matter, as it worked given shape 239x360)
+- There was a bug in the average pool function for RGB565 images related to the fact that RGB565
+is actually big endian. While fixing this bug, I also found that if I want to use face detection
+anymore I have to disable MQTT (by commenting the initialization function) as it seemed to use up
+quite some RAM and inference with the face detection model would crash. So, there is no possibility
+of testing this method with the whole pipeline anymore. Still, the implementation should work like
+a breeze for boards with enough memory.
 
 Labeling data:
 Using a pre-trained model from huggingface running on the edge as ground truth is the way to go,
@@ -34,6 +41,8 @@ tinkering with tensorflow lite micro and the model wouldn't learn much anyway.
 - Solution: extract some features from the image and then train a very simple classifier. Best idea would
 be to use some very toned-down HoG-style features
 - For classifier, it would be ideal to use a one-layer NN, but that might be too big.
+- 2-layer NN with HoG seems to work fine, ignore previous statement as it was made while the project was still
+in its infancy.
 
 Further optimizations:
 - Tried using async http requests. The ESP library only supports them if HTTPS is used. To avoid using a proper
