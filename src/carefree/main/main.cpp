@@ -38,13 +38,13 @@
 
 // Left hand side pins
 #define CAM_PIN_SCL 41
-#define CAM_PIN_VS 36
-#define CAM_PIN_PLK 35
-#define CAM_PIN_D7 34
-#define CAM_PIN_D5 33
-#define CAM_PIN_D3 47
-#define CAM_PIN_D1 48
-#define CAM_PIN_RET 26
+#define CAM_PIN_VS 33
+#define CAM_PIN_PLK 47 // TODO: move by a couple down so that led isn't used
+#define CAM_PIN_D7 48
+#define CAM_PIN_D5 26
+#define CAM_PIN_D3 21
+#define CAM_PIN_D1 20
+#define CAM_PIN_RET 19
 // #define CAM_PIN_RET -1
 // Right hand side pins
 #define CAM_PIN_SDA 42
@@ -84,7 +84,7 @@
 
 // HTTP DEFINES
 
-#define HTTP_HOST "192.168.24.26" // Server domain/address and port here
+#define HTTP_HOST "192.168.58.26" // Server domain/address and port here
 #define HTTP_PORT 5000
 
 // MQTT DEFINES
@@ -147,6 +147,8 @@ const char *const ssid = "OnePlus Nord"; // WiFi credentials here
 const char *const pass = "ayylmao123";
 bool wifi_connected = false;
 
+SemaphoreHandle_t wifi_connected_sem = NULL;
+
 // HTTP GLOBALS
 
 typedef struct _http_response
@@ -169,8 +171,8 @@ extern const char *mqtt_privkey;
 extern const char *mqtt_aws_uri;
 extern const char *mqtt_client_id;
 
-const char *const mqtt_post_topic = "post_weights";
-const char *const mqtt_get_topic = "get_weights";
+const char *const mqtt_post_topic = "sdk/test/python";
+const char *const mqtt_get_topic = "test/globalweights";
 
 // ML GLOBALS
 QueueHandle_t feats_queue = NULL;
@@ -209,6 +211,7 @@ void wifi_event_handler(void *event_handler_arg, esp_event_base_t event_base, in
     case IP_EVENT_STA_GOT_IP:
         ESP_LOGI(WIFI_TAG, "GOT IP");
         wifi_connected = true;
+        xSemaphoreGive(wifi_connected_sem);
     }
 }
 
@@ -331,8 +334,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(MQTT_TAG, "CONNECTED");
-        esp_mqtt_client_subscribe(client, mqtt_get_topic, MQTT_QOS);
         mqtt_connected = true;
+        esp_mqtt_client_subscribe(client, mqtt_get_topic, MQTT_QOS);
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGE(MQTT_TAG, "DISCONNECTED");
@@ -345,12 +348,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 #if DEBUG_NO_BLOCK_UNRECEIVED_MODEL
         // To make sure train task doesn't get stuck waiting for weights
-        ESP_LOGW(MQTT_TAG, "WE GIVE THE SEMAPHORE");
         xSemaphoreGive(weights_received);
 #endif
         break;
     case MQTT_EVENT_DATA:
-        ESP_LOGI(MQTT_TAG, "DATA RECEIVED");
+        ESP_LOGI(MQTT_TAG, "DATA RECEIVED, TOTAL IS %d", event->total_data_len);
         xSemaphoreTake(model_lock, portMAX_DELAY);
         currently_receiving_model = true;
         memcpy((uint8_t *)model + event->current_data_offset, event->data, event->data_len);
@@ -871,7 +873,6 @@ void train_task(void *arg)
         ESP_LOGW(ML_TAG, "Received target is %d", (int)target);
 
         // Lock model before updating
-        ESP_LOGW(MQTT_TAG, "WE WAIT FOR THE MODEL");
         xSemaphoreTake(model_lock, portMAX_DELAY);
         if (currently_receiving_model)
         {
@@ -942,8 +943,9 @@ void train_task(void *arg)
         if ((step + 1) % EPOCHS_PER_ROUND)
             continue;
         // Send weights through MQTT
+        // ESP_LOGD(MQTT_TAG, "Publishing model of size")
         msg_id = esp_mqtt_client_publish(client, mqtt_post_topic, (const char *)model, sizeof(model), MQTT_QOS, 0);
-        ESP_LOGI(MQTT_TAG, "Published model, msg_id=%d", msg_id);
+        ESP_LOGW(MQTT_TAG, "Published model, msg_id=%d", msg_id);
 #if DEBUG_NO_BLOCK_UNRECEIVED_MODEL
         if (msg_id == -1 || !mqtt_connected)
             continue;
@@ -951,7 +953,7 @@ void train_task(void *arg)
         // Wait for aggregate weights to come back
     wait_for_model:
 #endif
-        ESP_LOGW(MQTT_TAG, "WE WAIT FOR THE SEMAPHORE");
+        ESP_LOGW(MQTT_TAG, "WAITING TO RECEIVE MODEL");
         xSemaphoreTake(weights_received, portMAX_DELAY);
         ESP_LOGI(ML_TAG, "Weights received");
     }
@@ -960,6 +962,8 @@ void train_task(void *arg)
 extern "C" void app_main(void)
 {
     int ret;
+
+    wifi_connected_sem = xSemaphoreCreateBinary();
 
     weights_received = xSemaphoreCreateBinary();
     model_lock = xSemaphoreCreateMutex();
@@ -972,6 +976,7 @@ extern "C" void app_main(void)
     wifi_init();
 
     // MQTT
+    xSemaphoreTake(wifi_connected_sem, portMAX_DELAY);
     mqtt_initialize();
 
     // Camera
