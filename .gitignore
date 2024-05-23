@@ -41,6 +41,7 @@ sdkconfig.old
 
 # AWS credentials
 connection_kit
+certs
 
 # Debug files
 *.dSYM/

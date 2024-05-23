@@ -39,7 +39,7 @@
 // Left hand side pins
 #define CAM_PIN_SCL 41
 #define CAM_PIN_VS 33
-#define CAM_PIN_PLK 47 // TODO: move by a couple down so that led isn't used
+#define CAM_PIN_PLK 47
 #define CAM_PIN_D7 48
 #define CAM_PIN_D5 26
 #define CAM_PIN_D3 21
@@ -165,11 +165,11 @@ const bool send_jpeg_encoded = false;
 esp_mqtt_client_handle_t client;
 bool mqtt_connected = 0;
 
-extern const char *mqtt_root_ca_cert;
-extern const char *mqtt_cert;
-extern const char *mqtt_privkey;
-extern const char *mqtt_aws_uri;
-extern const char *mqtt_client_id;
+extern const char mqtt_root_ca_cert[] asm("_binary_root_ca_pem_start");
+extern const char mqtt_cert[] asm("_binary_cert_pem_start");
+extern const char mqtt_privkey[] asm("_binary_privkey_key_start");
+const char *const mqtt_aws_uri = "mqtts://a52peqbfn4vsr-ats.iot.eu-north-1.amazonaws.com";
+const char *const mqtt_client_id = "basicPubSub";
 
 const char *const mqtt_post_topic = "sdk/test/python";
 const char *const mqtt_get_topic = "test/globalweights";
@@ -943,7 +943,6 @@ void train_task(void *arg)
         if ((step + 1) % EPOCHS_PER_ROUND)
             continue;
         // Send weights through MQTT
-        // ESP_LOGD(MQTT_TAG, "Publishing model of size")
         msg_id = esp_mqtt_client_publish(client, mqtt_post_topic, (const char *)model, sizeof(model), MQTT_QOS, 0);
         ESP_LOGW(MQTT_TAG, "Published model, msg_id=%d", msg_id);
 #if DEBUG_NO_BLOCK_UNRECEIVED_MODEL
