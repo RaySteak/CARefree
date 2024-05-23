@@ -74,7 +74,8 @@ def extract_image(data, content_type):
     if content_type == 'application/jpeg':
         img = Image.open(BytesIO(data))
         img = np.array(img)
-        img = np.stack((img, img, img), axis = 2)
+        if len(img.shape) == 2 or img.shape[2] == 1:
+            img = np.stack((img, img, img), axis = 2)
     elif len(data) == QVGA_RGB565_LENGTH or len(data) == QQQVGA_RGB565_LENGTH:
         height, width = {
             QVGA_RGB565_LENGTH : (QVGA_RGB565_HEIGHT, QVGA_RGB565_WIDTH),

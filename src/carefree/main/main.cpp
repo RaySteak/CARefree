@@ -31,8 +31,9 @@
 #define USE_FACE_DETECTION 0
 #define TWO_LAYER_NN 1
 #define HTTPS 0
-// Beware, async works with HTTPS only. Also, right now it doesn't work at all because it returns EAGAIN only (TODO: fix that)
+// Beware, async works with HTTPS only. Also, it doesn't work at all because it returns EAGAIN only
 #define ASYNC_HTTP 0
+#define SEND_JPEG_ENCODED 0 // This also uses extra memory when enabled
 
 // CAMERA DEFINES
 
@@ -75,7 +76,6 @@
 #define PIXFORMAT PIXFORMAT_GRAYSCALE
 #define FRAMESIZE FRAMESIZE_QQVGA
 #endif
-#define JPG_MAX_SIZE 5 * 1024
 #define JPG_QUALITY 12
 
 // WIFI DEFINES
@@ -158,13 +158,12 @@ typedef struct _http_response
     SemaphoreHandle_t done_sem;
 } http_response;
 
-const bool send_jpeg_encoded = false;
-
 // MQTT GLOBALS
 
 esp_mqtt_client_handle_t client;
 bool mqtt_connected = 0;
 
+// Embedded file certificates are placed in the "certs" directory
 extern const char mqtt_root_ca_cert[] asm("_binary_root_ca_pem_start");
 extern const char mqtt_cert[] asm("_binary_cert_pem_start");
 extern const char mqtt_privkey[] asm("_binary_privkey_key_start");
@@ -441,10 +440,18 @@ int camera_init(pixformat_t pixformat, framesize_t framesize)
 
 size_t jpg_write_buf_cb(void *arg, size_t index, const void *data, size_t len)
 {
-    // TODO: Implement realloc of jpg buffer here instead of static buffer with hardcoded size;
-    // whenever there is a need for more space, realloc. Warning, this might cause fragmentation as well.
     jpg_encode_cb_params *params = (jpg_encode_cb_params *)arg;
+
     params->img_len += len;
+    if (!params->img)
+        params->img = (char *)malloc(params->img_len);
+    else
+        params->img = (char *)realloc(params->img, params->img_len);
+    if (!params->img)
+    {
+        ESP_LOGE(CAM_TAG, "Failed to allocate %lu bytes of memory for JPEG image", params->img_len);
+        return 0;
+    }
     memcpy(params->img + index, data, len);
     return len;
 }
@@ -661,21 +668,16 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
             http_post(HTTP_HOST, HTTP_PORT, "/debug/set_rect", (char *)rect, 4 * sizeof(uint32_t), "application/octet-stream", NULL, false);
         }
 #endif
-        if (send_jpeg_encoded) // This makes the program run out of memory on next img, beware
-        {
-            char *jpg_img = (char *)malloc(JPG_MAX_SIZE);
-            jpg_encode_cb_params params = {.img = jpg_img, .img_len = 0};
-            // Convert image to JPEG
-            frame2jpg_cb(fb, JPG_QUALITY, jpg_write_buf_cb, &params);
-            // Send image to server
-            http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", jpg_img, params.img_len, "application/jpeg", NULL, false);
-            free(jpg_img);
-        }
-        else
-        {
-            // Send image to server
-            http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)fb->buf, fb->len, "application/octet-stream", NULL, false);
-        }
+#if SEND_JPEG_ENCODED
+        jpg_encode_cb_params params = {.img = NULL, .img_len = 0};
+        // Convert image to JPEG
+        frame2jpg_cb(fb, JPG_QUALITY, jpg_write_buf_cb, &params);
+        // Send image to server
+        http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", params.img, params.img_len, "application/jpeg", NULL, false);
+#else
+        // Send image to server
+        http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)fb->buf, fb->len, "application/octet-stream", NULL, false);
+#endif
 #endif
 
 #if ASYNC_HTTP
@@ -690,37 +692,43 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
 #if USE_FACE_DETECTION
         if (!candidates.size())
         {
-            // TODO: turn this into goto (disable unused label error for that)
             esp_camera_fb_return(fb);
             return 0;
         }
 
-        dl::detect::result_t &face = candidates.front();
+        dl::detect::result_t *face = &candidates.front();
         uint8_t *pooled = (uint8_t *)avg_pool_rgb565((uint16_t *)fb->buf, fb->height, fb->width, POOL_KERNEL_SIZE, true);
         int height = fb->height / POOL_KERNEL_SIZE;
         int width = fb->width / POOL_KERNEL_SIZE;
         // http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)pooled, height * width, "application/octet-stream", NULL, false);
-        face.box[0] = face.box[0] < 0 ? 0 : face.box[0] / POOL_KERNEL_SIZE;
-        face.box[1] = face.box[1] < 0 ? 0 : face.box[1] / POOL_KERNEL_SIZE;
-        face.box[2] = face.box[2] > fb->width ? width : (int)(ceilf(face.box[2] / (float)POOL_KERNEL_SIZE));
-        face.box[3] = face.box[3] > fb->height ? height : (int)(ceilf(face.box[3] / (float)POOL_KERNEL_SIZE));
-
-        // Send image to server to get target ground truth class
-        esp_http_client_handle_t client = http_post(HTTP_HOST, HTTP_PORT, "/predict", (char *)pooled, height * width, "application/octet-stream", &response, ASYNC_HTTP);
-
-        uint8_t *resized = resize_bilinear_grayscale(pooled, height, width, FACE_SIZE, FACE_SIZE, &face);
-        free(pooled);
+        face->box[0] = face->box[0] < 0 ? 0 : face->box[0] / POOL_KERNEL_SIZE;
+        face->box[1] = face->box[1] < 0 ? 0 : face->box[1] / POOL_KERNEL_SIZE;
+        face->box[2] = face->box[2] > fb->width ? width : (int)(ceilf(face->box[2] / (float)POOL_KERNEL_SIZE));
+        face->box[3] = face->box[3] > fb->height ? height : (int)(ceilf(face->box[3] / (float)POOL_KERNEL_SIZE));
 #else
+        dl::detect::result_t *face = NULL;
         // Downsize image before sending
         uint8_t *pooled = (uint8_t *)avg_pool_grayscale((uint8_t *)fb->buf, fb->height, fb->width, POOL_KERNEL_SIZE);
         int height = fb->height / POOL_KERNEL_SIZE;
         int width = fb->width / POOL_KERNEL_SIZE;
-        // Send image to server to get target ground truth class
-        esp_http_client_handle_t client = http_post(HTTP_HOST, HTTP_PORT, "/predict", (char *)pooled, height * width, "application/octet-stream", &response, ASYNC_HTTP);
-
-        uint8_t *resized = resize_bilinear_grayscale(pooled, height, width, FACE_SIZE, FACE_SIZE, NULL);
-        free(pooled);
 #endif
+
+        // Send image to server to get target ground truth class
+#if SEND_JPEG_ENCODED
+        jpg_encode_cb_params params = {.img = NULL, .img_len = 0};
+        // Convert image to JPEG
+        frame2jpg_cb(fb, JPG_QUALITY, jpg_write_buf_cb, &params);
+        // Send image to server
+        esp_http_client_handle_t client = http_post(HTTP_HOST, HTTP_PORT, "/predict", params.img, params.img_len, "application/jpeg", &response, ASYNC_HTTP);
+        if (!client)
+            free(params.img);
+#else
+        esp_http_client_handle_t client = http_post(HTTP_HOST, HTTP_PORT, "/predict", (char *)pooled, height * width, "application/octet-stream", &response, ASYNC_HTTP);
+#endif
+
+        uint8_t *resized = resize_bilinear_grayscale(pooled, height, width, FACE_SIZE, FACE_SIZE, face);
+        free(pooled);
+
 #if DEBUG_SHOW_FACE
         http_post(HTTP_HOST, HTTP_PORT, "/debug/set_image", (char *)resized, FACE_SIZE * FACE_SIZE, "application/octet-stream", NULL, false);
 #endif
@@ -732,7 +740,13 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
         vSemaphoreDelete(done_sem);
 #endif
         if (client)
+        {
+#if SEND_JPEG_ENCODED
+            free(params.img);
+#endif
             esp_http_client_cleanup(client);
+        }
+
         if (response.completed_successfully)
         {
             *((uint8_t *)feature_vec) = class_label;
