@@ -49,6 +49,10 @@ QQQVGA_RGB565_WIDTH = 80
 QQQVGA_RGB565_HEIGHT = 60
 QQQVGA_RGB565_LENGTH = 9600
 
+QQVGA_GRAYSCALE_WIDTH = 160
+QQVGA_GRAYSCALE_HEIGHT = 120
+QQVGA_GRAYSCALE_LENGTH = 19200
+
 QVGA_GRAYSCALE_WIDTH = 320
 QVGA_GRAYSCALE_HEIGHT = 240
 QVGA_GRAYSCALE_LENGTH = 76800
@@ -90,10 +94,11 @@ def extract_image(data, content_type):
             g = ((high & 0b111) << 5) | (low >> 3)
             b = (low & 0b11111) << 3
             img[i // 2 // width, i // 2 % width] = [r, g, b]
-    elif len(data) == QVGA_GRAYSCALE_LENGTH or len(data) == QQQVGA_GRAYSCALE_LENGTH or len(data) == SQR_GRAYSCALE_LENGTH:
+    elif len(data) == QVGA_GRAYSCALE_LENGTH or len(data) == QQVGA_GRAYSCALE_LENGTH or len(data) == QQQVGA_GRAYSCALE_LENGTH or len(data) == SQR_GRAYSCALE_LENGTH:
         img_flattened = np.frombuffer(data, dtype = np.uint8)
         img = img_flattened.reshape({
             QVGA_GRAYSCALE_LENGTH : (QVGA_GRAYSCALE_HEIGHT, QVGA_GRAYSCALE_WIDTH),
+            QQVGA_GRAYSCALE_LENGTH : (QQVGA_GRAYSCALE_HEIGHT, QQVGA_GRAYSCALE_WIDTH),
             QQQVGA_GRAYSCALE_LENGTH : (QQQVGA_GRAYSCALE_HEIGHT, QQQVGA_GRAYSCALE_WIDTH),
             SQR_GRAYSCALE_LENGTH : (SQR_GRAYSCALE_HEIGHT, SQR_GRAYSCALE_WIDTH)
             }[len(data)])

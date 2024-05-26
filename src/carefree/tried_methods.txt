@@ -16,10 +16,12 @@ and just picking the top-left value is preferable and yields better results (fix
 points ahead and in the avg_pool_rgb565 for explanation of bug).
 - Well, as it turns out, the camera can also do QQVGA (160 * 240). Since we were already doing
 downscaling to QQQVGA (with 4-size pooling kernel), and having the impossibility to send QQVGA
-images to the server it would require too much RAM storing both a QVGA and QQVGA image, we will
-pick QQVGA as the resolution of choice. Problem is, the built-in face detection model still doesn't
-like to receive QVGA as input as it is too small for it (input aspect ratio or shape doesn't seem
-to matter, as it worked given shape 239x360)
+images to the server when taking QVGA images as it would require too much RAM storing both a QVGA
+and QQVGA image, we will pick QQVGA as the resolution of choice as it is favourable from every
+point of view for the grayscale case. Problem is, for the RGB565 case for the the built-in face
+detection model, it doesn't like to receive QVGA as input as it is too small for it. Upscaling it
+to fit the minimum size would use up too much memory as we would be roughly in the QQVGA + QVGA
+images at once AND in the RGB565 format.
 - There was a bug in the average pool function for RGB565 images related to the fact that RGB565
 is actually big endian. While fixing this bug, I also found that if I want to use face detection
 anymore I have to disable MQTT (by commenting the initialization function) as it seemed to use up

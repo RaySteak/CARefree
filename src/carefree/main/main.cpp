@@ -351,7 +351,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 #endif
         break;
     case MQTT_EVENT_DATA:
-        ESP_LOGI(MQTT_TAG, "DATA RECEIVED, TOTAL IS %d", event->total_data_len);
+        ESP_LOGI(MQTT_TAG, "DATA RECEIVED, %d/%d", event->current_data_offset + event->data_len, event->total_data_len);
         xSemaphoreTake(model_lock, portMAX_DELAY);
         currently_receiving_model = true;
         memcpy((uint8_t *)model + event->current_data_offset, event->data, event->data_len);
@@ -654,8 +654,8 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
 #if USE_FACE_DETECTION
         // It doesn't work to use the pooled image for HumanFaceDetectMSR01 inference, because of this error:
         // assert failed: dl::Tensor<T>& dl::Tensor<T>::set_shape(std::vector<int>) [with T = short int] dl_variable.cpp:20 (shape[i] >= 0)
-        // TODO: maybe look into it but it seems to be a bug with the library (maybe try different pooling shapes or something
-        // but even with 60x60 and QQVGA it seems to complain, seems to not like small input sizes, as aspect ratio doesn't seem to matter)
+        // The error is probably because it does not resize the image, but applies convolutions directly which will end up making the image
+        // too small, smaller than the next convolution kernel.
         // ESP_LOGW(CAM_TAG, "FREE HEAP MEMORY BEFORE INFER: %lu", esp_get_free_heap_size());
         std::list<dl::detect::result_t> candidates = s1->infer((uint16_t *)fb->buf, {(int)fb->height, (int)fb->width, 3});
 #endif
