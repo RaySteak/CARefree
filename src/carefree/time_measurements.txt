@@ -1,0 +1,21 @@
+HTTP Ground truth time to get (averaged over 20 measurements):
+80x60 pooled image,                     4800B -> 0.215607s
+// Doesn't really make sense to do jpg on the pooled image as it's already small enough,
+// and would lose even more quality. Could try though.
+160x120 original image jpeg quality 50 ~1500-2000B -> 0.163924s
+160x120 original image jpeg quality 12, ~600-1000B -> 0.139988s
+
+Time for getting back aggregate (not taking into consideration the AWS processing time),
+as aggregate is received from same topic that is posted
+Big 2-layer model of 29207 parametesrs: 11.791269600000001s
+Small 1-layer model of 4049 parameters: 1.904461s
+Small 1 layer model with even more
+dumbed down HoG of 567 parameters (that was created for using face detection but
+waas still not small enough to not run out of memory): 0.425408s
+
+Time to do 1 step of stochastic gradient descent
+Big 2-la    yer model of 29207 parametesrs: 0.013281s
+Small 1-layer model of 4049 parameters: 0.002382s
+Small 1 layer model with 567 parameters: 0.000889s
+
+0.29513

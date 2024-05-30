@@ -84,7 +84,7 @@
 
 // HTTP DEFINES
 
-#define HTTP_HOST "192.168.58.26" // Server domain/address and port here
+#define HTTP_HOST "192.168.160.26" // Server domain/address and port here
 #define HTTP_PORT 5000
 
 // MQTT DEFINES
@@ -718,11 +718,15 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
         jpg_encode_cb_params params = {.img = NULL, .img_len = 0};
         // Convert image to JPEG
         frame2jpg_cb(fb, JPG_QUALITY, jpg_write_buf_cb, &params);
+        // Return the frame buffer back to the driver for reuse as soon as possible
+        esp_camera_fb_return(fb);
         // Send image to server
         esp_http_client_handle_t client = http_post(HTTP_HOST, HTTP_PORT, "/predict", params.img, params.img_len, "application/jpeg", &response, ASYNC_HTTP);
         if (!client)
             free(params.img);
 #else
+        // Return the frame buffer back to the driver for reuse as soon as possible
+        esp_camera_fb_return(fb);
         esp_http_client_handle_t client = http_post(HTTP_HOST, HTTP_PORT, "/predict", (char *)pooled, height * width, "application/octet-stream", &response, ASYNC_HTTP);
 #endif
 
@@ -755,8 +759,6 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
 
         free(feature_vec);
     }
-    // Return the frame buffer back to the driver for reuse
-    esp_camera_fb_return(fb);
     return 0;
 }
 
