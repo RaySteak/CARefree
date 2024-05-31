@@ -154,7 +154,8 @@ SemaphoreHandle_t wifi_connected_sem = NULL;
 typedef struct _http_response
 {
     char *data;
-    bool completed_successfully;
+    size_t buf_len, cur_copied;
+    bool completed_successfully, overflown;
     SemaphoreHandle_t done_sem;
 } http_response;
 
@@ -241,13 +242,15 @@ void wifi_init()
 
 esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
-    static size_t cur_copied;
     http_response *response = (http_response *)evt->user_data;
     switch (evt->event_id)
     {
     case HTTP_EVENT_ON_CONNECTED:
         ESP_LOGI(HTTP_TAG, "CONNECTED");
-        cur_copied = 0;
+        if (!response)
+            break;
+        response->cur_copied = 0;
+        response->overflown = false;
         break;
     case HTTP_EVENT_HEADER_SENT:
         ESP_LOGI(HTTP_TAG, "HEADER SENT");
@@ -259,8 +262,14 @@ esp_err_t http_event_handler(esp_http_client_event_t *evt)
         ESP_LOGI(HTTP_TAG, "DATA RECEIVED, len=%d", evt->data_len);
         if (!response)
             break;
-        memcpy(response->data + cur_copied, evt->data, evt->data_len);
-        cur_copied += evt->data_len;
+        if (response->cur_copied + evt->data_len > response->buf_len)
+        {
+            ESP_LOGE(HTTP_TAG, "SERVER SENT MORE DATA THAN EXPECTED");
+            response->overflown = true;
+            break;
+        }
+        memcpy(response->data + response->cur_copied, evt->data, evt->data_len);
+        response->cur_copied += evt->data_len;
         break;
     case HTTP_EVENT_ON_FINISH:
         ESP_LOGI(HTTP_TAG, "FINISHED");
@@ -687,7 +696,10 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
 #endif
 
         uint8_t class_label;
-        http_response response = {.data = (char *)&class_label, .completed_successfully = false, .done_sem = done_sem};
+        http_response response;
+        response.data = (char *)&class_label;
+        response.done_sem = done_sem;
+        response.buf_len = sizeof(class_label);
 
 #if USE_FACE_DETECTION
         if (!candidates.size())
@@ -751,7 +763,7 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
             esp_http_client_cleanup(client);
         }
 
-        if (response.completed_successfully)
+        if (response.completed_successfully && !response.overflown)
         {
             *((uint8_t *)feature_vec) = class_label;
             xQueueSend(feats_queue, feature_vec, portMAX_DELAY);
