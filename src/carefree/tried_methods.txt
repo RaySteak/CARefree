@@ -69,3 +69,19 @@ outbox until sent which uses up too much memory, so we will make do with QOS 0.
 done optimally (from the prerspective of both code size and efficiency) and explained in the code through comments
 (see MQTT event handler and train task sections). Currently, for choice of simplicity, images received during model
 update are just discarded (IDEA: while model is being updated, stop taking photos and basically halt all code).
+
+Accelerometer:
+- Typical car acceleration during normal drive is 0.14g. ADXL345 interrupt threshold is 62.5mg/LSB = 0.0625g/LSB.
+So, in theory the smallest setting should be able to detect small accelerations that happen fairly frequently
+during driving. Any higher and it won't trigger enough (especially if the rented car is slow).
+- This accelerometer posed a lot of problems. First, the library I was able to find is very lacking and needed
+some extra additions to use the interrupts. Nothing a little datasheet searching won't fix. Furthermore,
+the i2c driver the library comes with is also very bad, and it seems it missed some things like pad_select which
+rendered it useless on some pins until the change was added. Another problem seems to be that it loses connection
+almost all the time. The measurements seem ok (albeit a bit off: 1.07g for Z, 0.03g for X and Y) when the board
+is still, but as soon as there is some moevement, the read errors appear, and it continues until the ESP is reset.
+Sometimes, there is not read error but the value is just off by a lot, like 40g for Z.
+- Problems aside, the settings chosen for the accelerometer are: full resolution at 13 bit, 3.9mg/LSB, as using
+higher resolution does not affect power draw. For the power mode, 50Hz is chosen for now, though a sampling rate
+that high is not needed anyway, and low-power mode is also set to false as the gains are not that great and it
+also limits output frequency range. 

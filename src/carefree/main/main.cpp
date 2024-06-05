@@ -1,6 +1,7 @@
 #define INCLUDE_vTaskSuspend 1
 #define CAMERA_MODEL_AI_THINKER
 
+#include "FreeRTOSConfig.h"
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -20,6 +21,7 @@
 #include "dl_tool.hpp"
 #include "esp_random.h"
 #include "esp_crt_bundle.h"
+#include "adxl345.h"
 
 // DEBUG DEFINES
 #define DEBUG_SHOW_IMAGE 0
@@ -34,6 +36,7 @@
 // Beware, async works with HTTPS only. Also, it doesn't work at all because it returns EAGAIN only
 #define ASYNC_HTTP 0
 #define SEND_JPEG_ENCODED 0 // This also uses extra memory when enabled
+#define SLEEP_NO_ACTIVITY 0
 
 // CAMERA DEFINES
 
@@ -124,6 +127,24 @@ typedef enum _activation
 
 #define EPOCHS_PER_ROUND 10
 
+// ACCELEROMETER DEFINES
+enum _acc_axis
+{
+    ACC_AXIS_X = 0,
+    ACC_AXIS_Y,
+    ACC_AXIS_Z
+};
+#define ACC_NUM_AXES 3
+
+#define VERTICAL_AXIS ACC_AXIS_Z
+
+#define ACC_I2C_ADDRESS 0x53
+#define ACC_PIN_SDA 34
+#define ACC_PIN_SCL 35
+#define ACC_PIN_INT1 45
+#define ACC_INT_THRESHOLD 1 // 1 unit is 62.5mg
+#define ACC_INT_NUM_ROUNDS_AWAKE 2
+
 // TAGS
 
 const char *const APP_TAG = "CARefree";
@@ -132,6 +153,7 @@ const char *const HTTP_TAG = "HTTP";
 const char *const MQTT_TAG = "MQTT";
 const char *const CAM_TAG = "Camera";
 const char *const ML_TAG = "Train";
+const char *const ACC_TAG = "Accelerometer";
 
 // CAMERA GLOBALS
 
@@ -185,6 +207,10 @@ SemaphoreHandle_t model_lock = NULL;
 SemaphoreHandle_t weights_received = NULL;
 bool currently_receiving_model = false;
 
+// ACCELEROMETER GLOBALS
+int remaining_rounds_awake = 0;
+SemaphoreHandle_t wakeup_acc_activity = NULL;
+
 // WIFI FUNCTIONS
 
 void wifi_event_handler(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
@@ -215,7 +241,7 @@ void wifi_event_handler(void *event_handler_arg, esp_event_base_t event_base, in
     }
 }
 
-void wifi_init()
+void wifi_init(void)
 {
     // Wi-Fi config phase
     esp_netif_init();
@@ -380,7 +406,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
-static int mqtt_initialize(void)
+static int mqtt_init(void)
 {
     esp_mqtt_client_config_t mqtt_cfg;
     memset(&mqtt_cfg, 0, sizeof(mqtt_cfg));
@@ -905,7 +931,7 @@ void train_task(void *arg)
         if (currently_receiving_model)
         {
             ESP_LOGW(ML_TAG, "Model is currently being updated, skipping this step");
-            step = (step / EPOCHS_PER_ROUND) * EPOCHS_PER_ROUND - 1; // Reset step to the beginning of the current round
+            step = (step / EPOCHS_PER_ROUND) * EPOCHS_PER_ROUND; // Reset step to the beginning of the current round
             xSemaphoreGive(model_lock);
 #if DEBUG_NO_BLOCK_UNRECEIVED_MODEL
             continue;
@@ -983,8 +1009,73 @@ void train_task(void *arg)
         ESP_LOGW(MQTT_TAG, "WAITING TO RECEIVE MODEL");
         xSemaphoreTake(weights_received, portMAX_DELAY);
         ESP_LOGI(ML_TAG, "Weights received");
+
+        remaining_rounds_awake--;
     }
 }
+
+// ACCELEROMETER FUNCTIONS
+void IRAM_ATTR accelerometer_handler(void *param)
+{
+    BaseType_t higher_priority_task_woken = pdFALSE;
+
+    // Do we need synchronization for the remaining_rounds_awake variable?
+    // The only non-atomic operation we're doing is the decrement, which
+    // loads the value into a register, decrements it and loads it back,
+    // so you could argue that synchronization is necessary.
+    // However, worst that happens is that while the value is being decremented,
+    // before it is being loaded back, the ISR might read it as 1 rather than 0.
+    // Note that this happens with synchronization as well, if the ISR gets called
+    // right before the value is being decremented, so it's the same. Same goes for
+    // resetting the value.
+    if (!remaining_rounds_awake)
+        xSemaphoreGiveFromISR(wakeup_acc_activity, &higher_priority_task_woken);
+    remaining_rounds_awake = ACC_INT_NUM_ROUNDS_AWAKE;
+
+    portYIELD_FROM_ISR(higher_priority_task_woken);
+}
+
+void acc_init(void)
+{
+    bool x_axis_int = true, y_axis_int = true, z_axis_int = true;
+    switch (VERTICAL_AXIS)
+    {
+    case ACC_AXIS_X:
+        x_axis_int = false;
+        break;
+    case ACC_AXIS_Y:
+        y_axis_int = false;
+        break;
+    case ACC_AXIS_Z:
+        z_axis_int = false;
+        break;
+    }
+
+    adxl345_init(ACC_I2C_ADDRESS, ACC_PIN_SCL, ACC_PIN_SDA);
+    adxl345_set_activity_threshold(ACC_INT_THRESHOLD, x_axis_int, y_axis_int, z_axis_int);
+    adxl345_set_interrupt(ADXL345_INT_ACTIVITY, 1, true);
+
+    esp_rom_gpio_pad_select_gpio((uint32_t)ACC_PIN_INT1);
+    gpio_set_direction((gpio_num_t)ACC_PIN_INT1, GPIO_MODE_INPUT);
+    gpio_pullup_dis((gpio_num_t)ACC_PIN_INT1);
+    gpio_pulldown_en((gpio_num_t)ACC_PIN_INT1);
+    gpio_set_intr_type((gpio_num_t)ACC_PIN_INT1, GPIO_INTR_POSEDGE);
+
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add((gpio_num_t)ACC_PIN_INT1, accelerometer_handler, NULL);
+
+    // while (true)
+    // {
+    //     int16_t acc_data[3];
+    //     adxl345_get_data(acc_data);
+    //     ESP_LOGI(ACC_TAG, "X: %f, Y: %f, Z: %f", acc_data[0] * 3.9f / 1000.f, acc_data[1] * 3.9f / 1000.f, acc_data[2] * 3.9f / 1000.f);
+    //     vTaskDelay(1000 / portTICK_PERIOD_MS);
+    // }
+}
+
+// To measure stack size, take the implementation from https://tinyurl.com/3r5pb3em
+// and append it to freertos/FreeRTOS-Kernel/tasks.c, then uncomment the next line
+extern "C" uint32_t uxTaskGetStackSize(TaskHandle_t xTask);
 
 extern "C" void app_main(void)
 {
@@ -995,6 +1086,8 @@ extern "C" void app_main(void)
     weights_received = xSemaphoreCreateBinary();
     model_lock = xSemaphoreCreateMutex();
 
+    wakeup_acc_activity = xSemaphoreCreateBinary();
+
     // Get free heap memory
     ESP_LOGI(APP_TAG, "Free heap memory: %lu bytes", esp_get_free_heap_size());
 
@@ -1004,7 +1097,7 @@ extern "C" void app_main(void)
 
     // MQTT
     xSemaphoreTake(wifi_connected_sem, portMAX_DELAY);
-    mqtt_initialize();
+    mqtt_init();
 
     // Camera
     ret = camera_init(PIXFORMAT, FRAMESIZE);
@@ -1019,12 +1112,29 @@ extern "C" void app_main(void)
 
     feats_queue = xQueueCreate(1, 1 + FEATS_LEN * sizeof(float));
 
+    // Accelerometer
+    acc_init();
+
+    // Tasks
     // TODO: look into how much is used to set stack size accodringly (especially for camera task)
-    xTaskCreate(train_task, "train_task", configMINIMAL_STACK_SIZE + 2000, NULL, 1, NULL);
+    TaskHandle_t train_task_handle;
+    xTaskCreate(train_task, "train_task", configMINIMAL_STACK_SIZE + 2100, NULL, 1, &train_task_handle);
 
     // TODO: move this to task and delete main task
     while (1)
     {
+#if SLEEP_NO_ACTIVITY
+        if (!remaining_rounds_awake)
+        {
+            // TODO: find a way that when waking up, it waits to receive the model, but only
+            // if it's not in the first round (or has received a model before).
+            // This way, rounds don't get entirely desynchronized on multiple devices.
+            ESP_LOGI(APP_TAG, "Num rounds expired, waiting for accelerometer activity");
+            xSemaphoreTake(wakeup_acc_activity, portMAX_DELAY);
+            ESP_LOGI(APP_TAG, "Woken up by accelerometer");
+        }
+#endif
+
         ret = camera_capture_image(&s1);
         if (ret != 0)
         {
@@ -1032,5 +1142,6 @@ extern "C" void app_main(void)
             return;
         }
         // vTaskDelay(1000 / portTICK_PERIOD_MS);
+        ESP_LOGE(APP_TAG, "STACK SIZE %ld", uxTaskGetStackSize(train_task_handle));
     }
 }
