@@ -84,4 +84,13 @@ Sometimes, there is not read error but the value is just off by a lot, like 40g 
 - Problems aside, the settings chosen for the accelerometer are: full resolution at 13 bit, 3.9mg/LSB, as using
 higher resolution does not affect power draw. For the power mode, 50Hz is chosen for now, though a sampling rate
 that high is not needed anyway, and low-power mode is also set to false as the gains are not that great and it
-also limits output frequency range. 
+also limits output frequency range.
+- Ok, so the software driver was the issue apparently, no more desync problem when switching to i2c hardware driver
+with the builtin "i2c.h" library. First problem encountered though is that after a lot of struggle of using the newer
+"i2c_master.h" library, it ended up not working and throwing errors that the old library was in use. Doing some
+digging into the code of "esp_camera.h" it is easy to find that it uses the old "i2c.h" driver. Sadly, these
+2 drivers can't coexist on the same application, so the only solution was to use the old driver library for
+the accelerometer as well.
+- There are still problems with the accelerometer, as the interrupt doesn't seem to work at all, and it always
+outputs that activity is detected regardless of the threshold or participating axes set. Changing the interrupt
+pin works, as only the active port seems to be always on, and the inactive one is off as expected.

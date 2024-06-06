@@ -33,7 +33,7 @@ extern "C"
         ADXL345_ACT_ACDC
     } adxl345_act_inact_ctl;
 
-    void adxl345_init(uint8_t i2c_address, uint8_t scl_pin, uint8_t sda_pin);
+    int adxl345_init(uint8_t i2c_address, uint8_t scl_pin, uint8_t sda_pin, int i2c_port, int timeout_ms);
     void adxl345_get_data(int16_t *result);
     void adxl345_set_interrupt(adxl345_int_type type, int int_pin, bool enable);
     void adxl345_set_activity_threshold(uint8_t threshold, bool x_axis, bool y_axis, bool z_axis);

@@ -40,6 +40,7 @@
 
 // CAMERA DEFINES
 
+#define CAM_I2C_PORT 0
 // Left hand side pins
 #define CAM_PIN_SCL 41
 #define CAM_PIN_VS 33
@@ -138,10 +139,13 @@ enum _acc_axis
 
 #define VERTICAL_AXIS ACC_AXIS_Z
 
+#define ACC_I2C_PORT 1
 #define ACC_I2C_ADDRESS 0x53
 #define ACC_PIN_SDA 34
 #define ACC_PIN_SCL 35
 #define ACC_PIN_INT1 45
+#define ACC_TIMEOUT_MS 100
+
 #define ACC_INT_THRESHOLD 1 // 1 unit is 62.5mg
 #define ACC_INT_NUM_ROUNDS_AWAKE 2
 
@@ -440,6 +444,7 @@ int camera_init(pixformat_t pixformat, framesize_t framesize)
 
     camera_config_t config;
     memset(&config, 0, sizeof(config));
+    config.sccb_i2c_port = CAM_I2C_PORT;
     config.ledc_channel = (ledc_channel_t)LEDC_CHANNEL_0;
     config.ledc_timer = (ledc_timer_t)LEDC_TIMER_0;
     config.xclk_freq_hz = XCLK_FREQ_HZ;
@@ -531,6 +536,7 @@ void *avg_pool_rgb565(uint16_t *in, int height, int width, int kernel_size, bool
 
             if (convert_to_grayscale)
             {
+                // Use sRGB colorimetric grayscale
                 uint8_t colorimetric_grasycale = (uint8_t)roundf(255.f * ((0.2126f * r / 31.f) + (0.7152f * g / 63.f) + (0.0722f * b / 31.f)));
                 ((uint8_t *)out)[(i / kernel_size) * out_width + (j / kernel_size)] = colorimetric_grasycale;
             }
@@ -1035,8 +1041,9 @@ void IRAM_ATTR accelerometer_handler(void *param)
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
-void acc_init(void)
+int acc_init(void)
 {
+    int ret;
     bool x_axis_int = true, y_axis_int = true, z_axis_int = true;
     switch (VERTICAL_AXIS)
     {
@@ -1051,7 +1058,12 @@ void acc_init(void)
         break;
     }
 
-    adxl345_init(ACC_I2C_ADDRESS, ACC_PIN_SCL, ACC_PIN_SDA);
+    ret = adxl345_init(ACC_I2C_ADDRESS, ACC_PIN_SCL, ACC_PIN_SDA, ACC_I2C_PORT, ACC_TIMEOUT_MS);
+    if (ret != 0)
+    {
+        ESP_LOGE(ACC_TAG, "ADXL345 Init Failed");
+        return -1;
+    }
     adxl345_set_activity_threshold(ACC_INT_THRESHOLD, x_axis_int, y_axis_int, z_axis_int);
     adxl345_set_interrupt(ADXL345_INT_ACTIVITY, 1, true);
 
@@ -1064,6 +1076,7 @@ void acc_init(void)
     gpio_install_isr_service(0);
     gpio_isr_handler_add((gpio_num_t)ACC_PIN_INT1, accelerometer_handler, NULL);
 
+    // Uncomment to test if accelerometer is working correctly
     // while (true)
     // {
     //     int16_t acc_data[3];
@@ -1071,6 +1084,7 @@ void acc_init(void)
     //     ESP_LOGI(ACC_TAG, "X: %f, Y: %f, Z: %f", acc_data[0] * 3.9f / 1000.f, acc_data[1] * 3.9f / 1000.f, acc_data[2] * 3.9f / 1000.f);
     //     vTaskDelay(1000 / portTICK_PERIOD_MS);
     // }
+    return 0;
 }
 
 // To measure stack size, take the implementation from https://tinyurl.com/3r5pb3em
@@ -1103,7 +1117,7 @@ extern "C" void app_main(void)
     ret = camera_init(PIXFORMAT, FRAMESIZE);
     if (ret != 0)
     {
-        ESP_LOGE("init_camera", "Camera Init Failed");
+        ESP_LOGE(CAM_TAG, "Init Failed");
         return;
     }
 
@@ -1112,8 +1126,13 @@ extern "C" void app_main(void)
 
     feats_queue = xQueueCreate(1, 1 + FEATS_LEN * sizeof(float));
 
-    // Accelerometer
-    acc_init();
+    // // Accelerometer
+    ret = acc_init();
+    if (ret != 0)
+    {
+        ESP_LOGE(ACC_TAG, "Init Failed");
+        return;
+    }
 
     // Tasks
     // TODO: look into how much is used to set stack size accodringly (especially for camera task)
