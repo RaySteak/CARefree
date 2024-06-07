@@ -24,12 +24,14 @@
 #include "adxl345.h"
 
 // DEBUG DEFINES
+
 #define DEBUG_SHOW_IMAGE 0
 #define DEBUG_SHOW_FACE 1
 #define DEBUG_PRINT_LOSS 1
 #define DEBUG_NO_BLOCK_UNRECEIVED_MODEL 1
 
 // CONFIG DEFINES
+
 #define USE_FACE_DETECTION 0
 #define TWO_LAYER_NN 1
 #define HTTPS 0
@@ -37,6 +39,14 @@
 #define ASYNC_HTTP 0
 #define SEND_JPEG_ENCODED 0 // This also uses extra memory when enabled
 #define SLEEP_NO_ACTIVITY 0
+
+// STACK SIZES DEFINES
+
+// Stack sizes are measured empirically
+// A bit of leeway is given but changing debug/config defines
+// might lead to bigger stacks and cause stack overflows
+#define CAMERA_TASK_STACK_SIZE 2800
+#define TRAIN_TASK_STACK_SIZE 2200
 
 // CAMERA DEFINES
 
@@ -201,6 +211,7 @@ const char *const mqtt_post_topic = "sdk/test/python";
 const char *const mqtt_get_topic = "test/globalweights";
 
 // ML GLOBALS
+
 QueueHandle_t feats_queue = NULL;
 #if TWO_LAYER_NN
 static float model[HIDDEN_LAYER_SIZE * (FEATS_LEN + NUM_CLASSES + 1) + NUM_CLASSES] = {0};
@@ -212,6 +223,7 @@ SemaphoreHandle_t weights_received = NULL;
 bool currently_receiving_model = false;
 
 // ACCELEROMETER GLOBALS
+
 int remaining_rounds_awake = 0;
 SemaphoreHandle_t wakeup_acc_activity = NULL;
 
@@ -806,6 +818,34 @@ int camera_capture_image(HumanFaceDetectMSR01 *s1)
     return 0;
 }
 
+void camera_task(void *arg)
+{
+    HumanFaceDetectMSR01 s1(0.1F, 0.5F, 1, 0.2F);
+
+    while (1)
+    {
+#if SLEEP_NO_ACTIVITY
+        if (!remaining_rounds_awake)
+        {
+            // TODO: find a way that when waking up, it waits to receive the model, but only
+            // if it's not in the first round (or has received a model before).
+            // This way, rounds don't get entirely desynchronized on multiple devices.
+            ESP_LOGI(APP_TAG, "Num rounds expired, waiting for accelerometer activity");
+            xSemaphoreTake(wakeup_acc_activity, portMAX_DELAY);
+            ESP_LOGI(APP_TAG, "Woken up by accelerometer");
+        }
+#endif
+
+        int ret = camera_capture_image(&s1);
+        if (ret != 0)
+            ESP_LOGE(CAM_TAG, "Capture Image Failed");
+
+        // For measuring stack usage
+        // min_remaining_bytes = uxTaskGetStackHighWaterMark2(NULL);
+        // ESP_LOGE(CAM_TAG, "TASK MIN REMAINING BYTES %ld", min_remaining_bytes);
+    }
+}
+
 // ML FUNCTIONS
 
 float uniform_rand(float min, float max)
@@ -932,6 +972,10 @@ void train_task(void *arg)
         uint8_t target = *((uint8_t *)feature_vec);
         ESP_LOGW(ML_TAG, "Received target is %d", (int)target);
 
+        // For measuring stack usage
+        // min_remaining_bytes = uxTaskGetStackHighWaterMark2(NULL);
+        // ESP_LOGE(ML_TAG, "TASK MIN REMAINING BYTES %ld", min_remaining_bytes);
+
         // Lock model before updating
         xSemaphoreTake(model_lock, portMAX_DELAY);
         if (currently_receiving_model)
@@ -1021,6 +1065,7 @@ void train_task(void *arg)
 }
 
 // ACCELEROMETER FUNCTIONS
+
 void IRAM_ATTR accelerometer_handler(void *param)
 {
     BaseType_t higher_priority_task_woken = pdFALSE;
@@ -1077,7 +1122,7 @@ int acc_init(void)
     gpio_isr_handler_add((gpio_num_t)ACC_PIN_INT1, accelerometer_handler, NULL);
 
     // Uncomment to test if accelerometer is working correctly
-    // while (true)
+    // while (1)
     // {
     //     int16_t acc_data[3];
     //     adxl345_get_data(acc_data);
@@ -1086,10 +1131,6 @@ int acc_init(void)
     // }
     return 0;
 }
-
-// To measure stack size, take the implementation from https://tinyurl.com/3r5pb3em
-// and append it to freertos/FreeRTOS-Kernel/tasks.c, then uncomment the next line
-extern "C" uint32_t uxTaskGetStackSize(TaskHandle_t xTask);
 
 extern "C" void app_main(void)
 {
@@ -1126,7 +1167,7 @@ extern "C" void app_main(void)
 
     feats_queue = xQueueCreate(1, 1 + FEATS_LEN * sizeof(float));
 
-    // // Accelerometer
+    // Accelerometer
     ret = acc_init();
     if (ret != 0)
     {
@@ -1135,32 +1176,8 @@ extern "C" void app_main(void)
     }
 
     // Tasks
-    // TODO: look into how much is used to set stack size accodringly (especially for camera task)
-    TaskHandle_t train_task_handle;
-    xTaskCreate(train_task, "train_task", configMINIMAL_STACK_SIZE + 2100, NULL, 1, &train_task_handle);
+    xTaskCreate(camera_task, "camera_task", CAMERA_TASK_STACK_SIZE, NULL, 1, NULL);
+    xTaskCreate(train_task, "train_task", TRAIN_TASK_STACK_SIZE, NULL, 1, NULL);
 
-    // TODO: move this to task and delete main task
-    while (1)
-    {
-#if SLEEP_NO_ACTIVITY
-        if (!remaining_rounds_awake)
-        {
-            // TODO: find a way that when waking up, it waits to receive the model, but only
-            // if it's not in the first round (or has received a model before).
-            // This way, rounds don't get entirely desynchronized on multiple devices.
-            ESP_LOGI(APP_TAG, "Num rounds expired, waiting for accelerometer activity");
-            xSemaphoreTake(wakeup_acc_activity, portMAX_DELAY);
-            ESP_LOGI(APP_TAG, "Woken up by accelerometer");
-        }
-#endif
-
-        ret = camera_capture_image(&s1);
-        if (ret != 0)
-        {
-            ESP_LOGE("capture_image", "Capture Image Failed");
-            return;
-        }
-        // vTaskDelay(1000 / portTICK_PERIOD_MS);
-        ESP_LOGE(APP_TAG, "STACK SIZE %ld", uxTaskGetStackSize(train_task_handle));
-    }
+    vTaskDelete(NULL);
 }
