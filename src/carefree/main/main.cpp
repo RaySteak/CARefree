@@ -38,14 +38,14 @@
 // Beware, async works with HTTPS only. Also, it doesn't work at all because it returns EAGAIN only
 #define ASYNC_HTTP 0
 #define SEND_JPEG_ENCODED 0 // This also uses extra memory when enabled
-#define SLEEP_NO_ACTIVITY 0
+#define SLEEP_NO_ACTIVITY 1
 
 // STACK SIZES DEFINES
 
 // Stack sizes are measured empirically
 // A bit of leeway is given but changing debug/config defines
 // might lead to bigger stacks and cause stack overflows
-#define CAMERA_TASK_STACK_SIZE 2800
+#define CAMERA_TASK_STACK_SIZE 3000
 #define TRAIN_TASK_STACK_SIZE 2200
 
 // CAMERA DEFINES
@@ -151,12 +151,12 @@ enum _acc_axis
 
 #define ACC_I2C_PORT 1
 #define ACC_I2C_ADDRESS 0x53
-#define ACC_PIN_SDA 34
-#define ACC_PIN_SCL 35
-#define ACC_PIN_INT1 45
+#define ACC_PIN_SDA 39
+#define ACC_PIN_SCL 40
+#define ACC_PIN_INT1 34
 #define ACC_TIMEOUT_MS 100
 
-#define ACC_INT_THRESHOLD 1 // 1 unit is 62.5mg
+#define ACC_INT_THRESHOLD 6 // 1 unit is 62.5mg
 #define ACC_INT_NUM_ROUNDS_AWAKE 2
 
 // TAGS
@@ -835,6 +835,8 @@ void camera_task(void *arg)
             ESP_LOGI(APP_TAG, "Woken up by accelerometer");
         }
 #endif
+        // Clear accelerometer interrupt
+        adxl345_clear_interrupt();
 
         int ret = camera_capture_image(&s1);
         if (ret != 0)
@@ -1112,6 +1114,8 @@ int acc_init(void)
     adxl345_set_activity_threshold(ACC_INT_THRESHOLD, x_axis_int, y_axis_int, z_axis_int);
     adxl345_set_interrupt(ADXL345_INT_ACTIVITY, 1, true);
 
+    adxl345_clear_interrupt();
+
     esp_rom_gpio_pad_select_gpio((uint32_t)ACC_PIN_INT1);
     gpio_set_direction((gpio_num_t)ACC_PIN_INT1, GPIO_MODE_INPUT);
     gpio_pullup_dis((gpio_num_t)ACC_PIN_INT1);
@@ -1127,6 +1131,7 @@ int acc_init(void)
     //     int16_t acc_data[3];
     //     adxl345_get_data(acc_data);
     //     ESP_LOGI(ACC_TAG, "X: %f, Y: %f, Z: %f", acc_data[0] * 3.9f / 1000.f, acc_data[1] * 3.9f / 1000.f, acc_data[2] * 3.9f / 1000.f);
+    //     adxl345_clear_interrupt();
     //     vTaskDelay(1000 / portTICK_PERIOD_MS);
     // }
     return 0;

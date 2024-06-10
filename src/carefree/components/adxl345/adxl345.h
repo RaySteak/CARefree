@@ -37,6 +37,7 @@ extern "C"
     void adxl345_get_data(int16_t *result);
     void adxl345_set_interrupt(adxl345_int_type type, int int_pin, bool enable);
     void adxl345_set_activity_threshold(uint8_t threshold, bool x_axis, bool y_axis, bool z_axis);
+    void adxl345_clear_interrupt();
 
 #ifdef __cplusplus
 }

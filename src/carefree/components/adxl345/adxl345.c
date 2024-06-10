@@ -185,3 +185,9 @@ void adxl345_set_activity_threshold(uint8_t threshold, bool x_axis, bool y_axis,
         val &= ~(1 << ADXL345_ACT_Z);
     i2c_write_byte_to_reg(reg_act_inact_ctl, val);
 }
+
+void adxl345_clear_interrupt()
+{
+    uint8_t val;
+    i2c_read_from_reg(0x30, &val, 1);
+}
