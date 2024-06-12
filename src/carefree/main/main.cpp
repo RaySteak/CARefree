@@ -825,11 +825,10 @@ void camera_task(void *arg)
     while (1)
     {
 #if SLEEP_NO_ACTIVITY
+        if (gpio_get_level((gpio_num_t)ACC_PIN_INT1))
+            remaining_rounds_awake = ACC_INT_NUM_ROUNDS_AWAKE;
         if (!remaining_rounds_awake)
         {
-            // TODO: find a way that when waking up, it waits to receive the model, but only
-            // if it's not in the first round (or has received a model before).
-            // This way, rounds don't get entirely desynchronized on multiple devices.
             ESP_LOGI(APP_TAG, "Num rounds expired, waiting for accelerometer activity");
             xSemaphoreTake(wakeup_acc_activity, portMAX_DELAY);
             ESP_LOGI(APP_TAG, "Woken up by accelerometer");

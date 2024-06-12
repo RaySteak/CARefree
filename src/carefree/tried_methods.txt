@@ -84,7 +84,7 @@ Sometimes, there is not read error but the value is just off by a lot, like 40g 
 - Problems aside, the settings chosen for the accelerometer are: full resolution at 13 bit, 3.9mg/LSB, as using
 higher resolution does not affect power draw. For the power mode, 50Hz is chosen for now, though a sampling rate
 that high is not needed anyway, and low-power mode is also set to false as the gains are not that great and it
-also limits output frequency range.
+also limits output frequency range and adds noise.
 - Ok, so the software driver was the issue apparently, no more desync problem when switching to i2c hardware driver
 with the builtin "i2c.h" library. First problem encountered though is that after a lot of struggle of using the newer
 "i2c_master.h" library, it ended up not working and throwing errors that the old library was in use. Doing some
@@ -94,3 +94,12 @@ the accelerometer as well.
 - There are still problems with the accelerometer, as the interrupt doesn't seem to work at all, and it always
 outputs that activity is detected regardless of the threshold or participating axes set. Changing the interrupt
 pin works, as only the active port seems to be always on, and the inactive one is off as expected.
+- It seems the interrupt of the accelerometer needs to be cleared. Thing is, there are 2 ways to clear it, either
+reading the 6 byte data register starting at 0x32 or reading the interrupt source register at 0x30. The former
+did not work at all which first prompted me to think the first accelerometer was broken. The latter works, but
+the threshold had to be set higher (6 * 62.5mg) as just the idle noise was triggering it.
+- Future improvements would be to add a way to better synchronize rounds between devices. At first it seemed like
+a good idea to make the ESP wait for a model after it wakes up (apart from when it's on first round). This idea
+was quickly scrapped because then very few device would be sending to the cloud then and would just be waiting for
+a model. It should be up to the cloud to decide how many devices need to have sent the model so that it runs
+aggregation.
