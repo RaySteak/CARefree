@@ -102,4 +102,5 @@ the threshold had to be set higher (6 * 62.5mg) as just the idle noise was trigg
 a good idea to make the ESP wait for a model after it wakes up (apart from when it's on first round). This idea
 was quickly scrapped because then very few device would be sending to the cloud then and would just be waiting for
 a model. It should be up to the cloud to decide how many devices need to have sent the model so that it runs
-aggregation.
+aggregation. Another improvement is to look into sleep modes and go into either light sleep or (prefferably) deep
+sleep using one of the 2 EXT pins from the suite of RTC pins.
