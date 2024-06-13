@@ -105,7 +105,7 @@ When the car starts moving, the ESP32 initializes the camera module (OV7670) and
 #### 2. Data Capture and Preprocessing
 
 - **Camera Capture**: The camera captures images of the driver's face. The images are processed to convert them from VGA RGB565 to QQVGA grayscale, reducing data size and preparing them for feature extraction.
-- **Accelerometer Data**: The accelerometer records acceleration data to monitor driving behavior, detecting sudden movements and irregular driving patterns.
+- **Accelerometer Data**: The accelerometer raises external hardware interrupts when it detects activity. In the future could also be used for recording acceleration data to monitor driving behavior, detecting sudden movements and irregular driving patterns.
 
 #### 3. Feature Extraction using HoG
 
@@ -268,6 +268,8 @@ Developing the Car Dealership Test Drive Monitoring System presented several sig
 **Solution**: 
 - **Simplified Feature Extraction**: Instead of using a large pre-trained Convolutional Neural Network (CNN), the system uses Histogram of Oriented Gradients (HoG) for feature extraction. HoG is computationally efficient and requires less memory.
 - **Lightweight Neural Network**: The extracted HoG features are processed by a lightweight neural network, reducing the computational burden on the ESP32.
+- **Optimizations to learning**: By merging backpropagation with the update rule, training is both faster and has a smaller memory footprint.
+- **Stack optimization for tasks**: Remaining stack size was monitored for different uses with the "uxTaskGetStackHighWaterMark2" function, and adjusted accordingly for each task so that no byte is wasted.
 
 #### 2. **Real-Time Data Processing**
 
@@ -284,6 +286,7 @@ Developing the Car Dealership Test Drive Monitoring System presented several sig
 **Solution**:
 - **Local Processing**: All initial data processing, including image capture and feature extraction, is performed locally on the ESP32. This ensures that sensitive data does not leave the device.
 - **Encrypted Communication**: Data sent to the edge server and cloud is encrypted using HTTPS and MQTT with TLS, ensuring secure transmission.
+- **Embedding of certificates in assembly code**: In order to avoid disclosing the certificates in the source code, the binary data embedding functionality is leveraged to turn the certificate and key files into assembly byte declarations which are then added to the program at link time.
 
 #### 4. **Model Training and Updating**
 
@@ -299,7 +302,7 @@ Developing the Car Dealership Test Drive Monitoring System presented several sig
 **Challenge**: Reducing energy consumption to ensure the system can run for extended periods without frequent recharging, especially important for battery-operated IoT devices.
 
 **Solution**:
-- **Acceleration Trigger**: Only starts retrieving information when the car is moving.
+- **Acceleration Trigger**: Only starts retrieving information when the car is moving. This also prevents the system from taking images in the scenario when the car is idle and there is no one inside (at startup), and should be especially useful for the case when the face recognition model is not used.
 
 ### Measurements <a name="measurements"></a>
 
@@ -380,3 +383,6 @@ Here are some example configurations demonstrating how these macros can be adjus
 🔄 **Versatility**: By leveraging these macros, the Car Dealership Test Drive Monitoring System can be easily configured to meet various needs, from intensive development and testing to efficient and secure production deployments.
 
 By providing a high level of configurability, the system ensures that it can be customized and optimized for different use cases, making it a versatile and powerful tool for modern car dealerships.
+
+### Other notes
+For a deeper and 'rawer' insight into the mishaps encountered along the way and the thought process behind some of the choices, refer to this file: [tried_methods.txt](src/carefree/tried_methods.txt)
