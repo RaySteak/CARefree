@@ -655,16 +655,16 @@ void *extract_hog_features(uint8_t *in, int height, int width)
                 for (int bj = 0; bj < patch_size; bj++)
                 {
                     int pos = (i + bi) * width + j + bj;
-                    int pos_diff1, pos_diff2;
+                    int diff1, diff2;
                     int dx, dy;
 
-                    pos_diff1 = j == 0 ? in[pos] : in[pos - 1];
-                    pos_diff2 = j == width - 1 ? in[pos] : in[pos + 1];
-                    dx = in[pos_diff2] - in[pos_diff1];
+                    diff1 = (j + bj) == 0 ? in[pos] : in[pos - 1];
+                    diff2 = (j + bj) == (width - 1) ? in[pos] : in[pos + 1];
+                    dx = diff2 - diff1;
 
-                    pos_diff1 = i == 0 ? in[pos] : in[pos - width];
-                    pos_diff2 = i == height - 1 ? in[pos] : in[pos + width];
-                    dy = in[pos_diff1] - in[pos_diff2];
+                    diff1 = (i + bi) == 0 ? in[pos] : in[pos - width];
+                    diff2 = (i + bi) == (height - 1) ? in[pos] : in[pos + width];
+                    dy = diff1 - diff2;
 
                     float angle = atan2f(dy, dx);               // returns result in [-PI, PI]
                     angle = angle < 0.f ? angle + M_PI : angle; // constrain angle to [0, PI]
